@@ -7,6 +7,7 @@ from transformers import AutoTokenizer
 class Model(nn.Module):
     def __init__(self, vocab_size: int):
         super().__init__()
+        self.act = nn.LeakyReLU()
         self.emb = nn.Embedding(vocab_size, 30)
         self.lstm1 = nn.LSTM(30, 30, 1)
         self.linear1 = nn.Linear(30, 50)
@@ -18,6 +19,7 @@ class Model(nn.Module):
         x = self.emb(x)
         x, _ = self.lstm1(x)
         x = self.linear1(x)
+        x = self.act(x)
         x, _ = self.lstm2(x)
         return self.linear2(x)
 
