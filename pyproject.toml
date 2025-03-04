@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "proofflow"
+version = "0.1.0"
+description = ""
+authors = ["Simon Sorg <simon.sorg@student.hpi.de>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+lean-repl-py = "^0.1.10"
+torch = { version = "2.6.0", source = "pytorch-cpu"}
+transformers = "^4.49.0"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
