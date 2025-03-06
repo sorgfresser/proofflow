@@ -8,9 +8,9 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import PreTokenizer, Whitespace, Punctuation, Sequence
 from pathlib import Path
 
-
 tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
-trainer = BpeTrainer(special_tokens=["[UNK]", "[PAD]", "[EOS]", "[PROOFSTATE]", "[PROOFSTEP]", "[TACTICS]"])
+vocab_size = 50_257
+trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=["[UNK]", "[PAD]", "[EOS]", "[PROOFSTATE]", "[PROOFSTEP]", "[TACTICS]"])
 
 # We split on whitespaces or periods, as periods are used frequently in imports
 # For example, we do not want multiple namespaces in one token
