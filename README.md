@@ -18,5 +18,7 @@ To add a dependency you introduced, run
 poetry add <dependencyname>
 ```
 
+You also need to get the LeanDojo data. For this, obtain it from [Zenodo](https://zenodo.org/records/12740403). Unzip the file in the root folder of this repo, such that `leandojo_benchmark_4` is on the same level as `leanproject` and `proofflow`. 
+
 # Usage
 

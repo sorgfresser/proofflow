@@ -7,23 +7,23 @@ MAX_OUTPUT_LEN = 500
 
 class Policy:
     """
-    A policy generating subsequent tactics given a goal and optionally the tactics so far
+    A policy generating subsequent tactics given a proof state and optionally the tactics so far
 
     Will predict tactics querying the model using the prompt
-    GOAL <goal> PROOFSTEP
+    PROOFSTATE <state> PROOFSTEP
 
     Optionally, if tactics so far are given, will instead prompt as
-    GOAL <goal> TACTICS <tactics> PROOFSTEP
+    PROOFSTATE <state> TACTICS <tactics> PROOFSTEP
     """
 
-    def __init__(self, model: nn.Module, eos_id: int, proof_step_id: int, goal_id: int, tactics_id: int,
+    def __init__(self, model: nn.Module, eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
                  tactics_sep_id: int, tokenizer: PreTrainedTokenizer):
         """
 
         :param model: The underlying model to use
         :param eos_id: The eos token id, marking end of generation
         :param proof_step_id: The proof step token id
-        :param goal_id: The goal token id
+        :param proof_state_id: The proof state token id
         :param tactics_id: The tactics token id
         :param tactics_sep_id: The tactics separation token id
         :param tokenizer: The tokenizer to use
@@ -31,21 +31,21 @@ class Policy:
         self.model = model
         self.eos_token = eos_id
         self.proof_step_id = proof_step_id
-        self.goal_id = goal_id
+        self.proof_state_id = proof_state_id
         self.tactics_id = tactics_id
         self.tactics_sep_id = tactics_sep_id
         self.tokenizer = tokenizer
         self.softmax = nn.Softmax()
 
-    def next_tactic(self, goal: str, tactics_so_far: Optional[List[str]] = None, temperature: float = 0.0) -> str:
-        """Predict the subsequent tactic for the given goal.
+    def next_tactic(self, proof_state: str, tactics_so_far: Optional[List[str]] = None, temperature: float = 0.0) -> str:
+        """Predict the subsequent tactic for the given proof state (which might have multiple goals)
 
-        :param goal: The goal to predict the tactic for.
+        :param proof_state: The proof state used to predict the tactic for.
         :param tactics_so_far: Optional list of tactics so far
         :param temperature: The temperature to use, 0 for greedy sampling
         :return: The subsequent tactic
         """
-        prompt = self._build_prompt(goal, tactics_so_far)
+        prompt = self._build_prompt(proof_state, tactics_so_far)
         prompt_tensor = torch.tensor(prompt)
         token = None
         tactic = []
@@ -63,14 +63,14 @@ class Policy:
         tactic.pop(-1)
         return self.tokenizer.decode(tactic)
 
-    def _build_prompt(self, goal: str, tactics_so_far: Optional[List[str]] = None) -> List[int]:
-        goal_ids: List[int] = self.tokenizer.encode(goal)
+    def _build_prompt(self, proof_state: str, tactics_so_far: Optional[List[str]] = None) -> List[int]:
+        state_ids: List[int] = self.tokenizer.encode(proof_state)
         if tactics_so_far is not None:
             tactics: List[List[int]] = [self.tokenizer.encode(tactic) for tactic in tactics_so_far]
             for idx, tactic in enumerate(tactics):
                 if idx < len(tactics) - 1:
                     tactic.append(self.tactics_sep_id)
             tactics_flat: List[int] = sum(tactics, [])
-            return [self.goal_id] + goal_ids + [self.tactics_id] + tactics_flat + [
+            return [self.proof_state_id] + state_ids + [self.tactics_id] + tactics_flat + [
                 self.proof_step_id]
-        return [self.goal_id] + goal_ids + [self.proof_step_id]
+        return [self.proof_state_id] + state_ids + [self.proof_step_id]
