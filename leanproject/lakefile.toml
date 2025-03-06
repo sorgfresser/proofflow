@@ -1,0 +1,10 @@
+name = "LeanProject"
+defaultTargets = ["LeanProject"]
+
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+rev = "29dcec074de168ac2bf835a77ef68bbe069194c5"
+
+[[lean_lib]]
+name = "LeanProject"
