@@ -72,7 +72,7 @@ proofstep_id = tokenizer.added_tokens_encoder["[PROOFSTEP]"]
 tactics_id = tokenizer.added_tokens_encoder["[TACTICS]"]
 tactics_sep_id = tokenizer.added_tokens_encoder["[SEP]"]
 tokenizer.pad_token = "[PAD]"
-policy = Policy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, tokenizer)
+policy = Policy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, tokenizer, device)
 # train_data_loader = DataLoader(train_data, batch_size=64, shuffle=True)
 # test_data_loader = DataLoader(test_data, batch_size=64, shuffle=True)
 # valid_data_loader = DataLoader(valid_data, batch_size=64, shuffle=True)
