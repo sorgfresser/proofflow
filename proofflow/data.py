@@ -3,7 +3,7 @@ import json
 from typing import Any, Sequence, Generator
 from pydantic import BaseModel, model_validator
 from lean_repl_py import LeanREPLProofState, LeanREPLHandler
-from sympy.assumptions.refine import handlers_dict
+from torch.utils.data import Dataset
 
 LEAN_DOJO_PATH = Path("../leandojo_benchmark_4/random")
 
@@ -207,10 +207,37 @@ def parse_json(json_path: Path) -> Generator[Theorem, None, None]:
         yield Theorem.model_validate(entry)
 
 
+class TheoremDataset(Dataset):
+    def __init__(self, json_path: Path):
+        self.json_path = json_path
+        self.thms = list(parse_json(json_path))
+
+    def __len__(self):
+        return len(self.thms)
+
+    def __getitem__(self, item):
+        return self.thms[item]
+
+
+class TrainSampleDataset(TheoremDataset):
+    def __init__(self, json_path: Path):
+        super().__init__(json_path)
+        self.samples = [sample for thm in self.thms for sample in thm.to_samples()]
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, item) -> TrainingSample:
+        return self.samples[item]
+
+
 if __name__ == '__main__':
     from lean_repl_py import LeanREPLHandler
 
     handler = LeanREPLHandler(Path("../leanproject"))
+    train_data = TheoremDataset(LEAN_DOJO_PATH / "train.json")
+    valid_data = TheoremDataset(LEAN_DOJO_PATH / "val.json")
+    test_data = TheoremDataset(LEAN_DOJO_PATH / "test.json")
     for thm in parse_json(LEAN_DOJO_PATH / "train.json"):
         # statement = thm.theorem_statement(Path("../mathlib4"))
         # imports = thm.imports(Path("../mathlib4"))

@@ -1,9 +1,11 @@
 from torch import nn
 from typing import Optional, List
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 import torch
+from data import TrainingSample
 
 MAX_OUTPUT_LEN = 500
+
 
 class Policy:
     """
@@ -17,7 +19,7 @@ class Policy:
     """
 
     def __init__(self, model: nn.Module, eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
-                 tactics_sep_id: int, tokenizer: PreTrainedTokenizer):
+                 tactics_sep_id: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast):
         """
 
         :param model: The underlying model to use
@@ -36,8 +38,10 @@ class Policy:
         self.tactics_sep_id = tactics_sep_id
         self.tokenizer = tokenizer
         self.softmax = nn.Softmax()
+        self.loss_fn = nn.CrossEntropyLoss()
 
-    def next_tactic(self, proof_state: str, tactics_so_far: Optional[List[str]] = None, temperature: float = 0.0) -> str:
+    def next_tactic(self, proof_state: str, tactics_so_far: Optional[List[str]] = None,
+                    temperature: float = 0.0) -> str:
         """Predict the subsequent tactic for the given proof state (which might have multiple goals)
 
         :param proof_state: The proof state used to predict the tactic for.
@@ -51,7 +55,8 @@ class Policy:
         tactic = []
         idx = 0
         while token != self.eos_token and idx < MAX_OUTPUT_LEN:
-            logits = self.model(prompt_tensor)[-1] # we only use the final one, the rest is previous tokens only used in training
+            logits = self.model(prompt_tensor)[
+                -1]  # we only use the final one, the rest is previous tokens only used in training
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
                 token = torch.multinomial(softmaxed, 1).squeeze()
@@ -74,3 +79,28 @@ class Policy:
             return [self.proof_state_id] + state_ids + [self.tactics_id] + tactics_flat + [
                 self.proof_step_id]
         return [self.proof_state_id] + state_ids + [self.proof_step_id]
+
+    def train_batch(self, batch: list[TrainingSample], loss_on_prompt: bool = False):
+        """Train on one single batch of training samples.
+
+        :param batch:
+        :param loss_on_prompt: Whether to also compute language modelling loss on prompt tokens.
+        :return:
+        """
+        prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far) for sample in batch]
+        tactics = [self.tokenizer.encode(sample.tactic) for sample in batch]
+
+        full = {
+            "input_ids": [prompt + tactic + [self.eos_token] for prompt, tactic in zip(prompts, tactics, strict=True)]}
+
+        padded = self.tokenizer.pad(full, padding_side="right", return_attention_mask=True, return_tensors="pt")
+        input_ids = padded.input_ids
+        attention_mask = padded.attention_mask[:, 1:]
+        logits = self.model(input_ids)[:, :-1, :]
+        labels = input_ids[:, 1:]
+        labels = labels.masked_fill(~attention_mask.bool(), -100)
+        # Only compute loss for the part after the prompt
+        if not loss_on_prompt:
+            for i in range(len(prompts)):
+                labels[i, :len(prompts[i]) - 1] = -100
+        return self.loss_fn(logits.transpose(2, 1), labels)
