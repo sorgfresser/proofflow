@@ -52,3 +52,4 @@ tactics_sep_id = 262
 policy = Policy(model, eos_token, proof_step_id, goal_id, tactics_id, tactics_sep_id, tokenizer)
 
 print(policy.next_tactic(response.goals[0]))
+print(policy.next_tactic(response.goals[0], temperature=0.1))

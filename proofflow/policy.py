@@ -54,7 +54,7 @@ class Policy:
             logits = self.model(prompt_tensor)[-1] # we only use the final one, the rest is previous tokens only used in training
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
-                token = softmaxed.sample()
+                token = torch.multinomial(softmaxed, 1).squeeze()
             else:
                 token = logits.argmax(dim=0)
             prompt_tensor = torch.cat([prompt_tensor, token[None]])
