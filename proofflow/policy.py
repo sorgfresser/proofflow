@@ -99,6 +99,7 @@ class Policy:
         input_ids = padded.input_ids
         attention_mask = padded.attention_mask[:, 1:]
         input_ids = input_ids.to(self.device)
+        attention_mask = attention_mask.to(self.device)
         logits = self.model(input_ids)[:, :-1, :]
         labels = input_ids[:, 1:]
         labels = labels.masked_fill(~attention_mask.bool(), -100)
