@@ -19,7 +19,7 @@ class Policy:
     """
 
     def __init__(self, model: nn.Module, eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
-                 tactics_sep_id: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast):
+                 tactics_sep_id: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
         """
 
         :param model: The underlying model to use
@@ -29,6 +29,7 @@ class Policy:
         :param tactics_id: The tactics token id
         :param tactics_sep_id: The tactics separation token id
         :param tokenizer: The tokenizer to use
+        :param device: The device the model is on
         """
         self.model = model
         self.eos_token = eos_id
@@ -39,6 +40,7 @@ class Policy:
         self.tokenizer = tokenizer
         self.softmax = nn.Softmax()
         self.loss_fn = nn.CrossEntropyLoss()
+        self.device = device
 
     def next_tactic(self, proof_state: str, tactics_so_far: Optional[List[str]] = None,
                     temperature: float = 0.0) -> str:
@@ -96,7 +98,7 @@ class Policy:
         padded = self.tokenizer.pad(full, padding_side="right", return_attention_mask=True, return_tensors="pt")
         input_ids = padded.input_ids
         attention_mask = padded.attention_mask[:, 1:]
-        input_ids = input_ids.to(self.model.device)
+        input_ids = input_ids.to(self.device)
         logits = self.model(input_ids)[:, :-1, :]
         labels = input_ids[:, 1:]
         labels = labels.masked_fill(~attention_mask.bool(), -100)
