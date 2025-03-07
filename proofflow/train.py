@@ -1,6 +1,6 @@
 from torch import nn
 import torch
-from model.ffm import FFM
+from proofflow.model.ffm import FFM
 from proofflow.data import parse_json, LEAN_DOJO_PATH, TheoremDataset, TrainSampleDataset, TrainingSample
 from pathlib import Path
 from torch.utils.data import DataLoader
@@ -63,7 +63,9 @@ test_data = TheoremDataset(LEAN_DOJO_PATH / "test.json")
 
 tokenizer = PreTrainedTokenizerFast(tokenizer_file="lean_tokenizer.json")
 
-model = Model(tokenizer.vocab_size)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+model = Model(tokenizer.vocab_size).to(device)
 eos_id = tokenizer.added_tokens_encoder["[EOS]"]
 proofstate_id = tokenizer.added_tokens_encoder["[PROOFSTATE]"]
 proofstep_id = tokenizer.added_tokens_encoder["[PROOFSTEP]"]

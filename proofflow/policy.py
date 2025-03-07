@@ -2,7 +2,7 @@ from torch import nn
 from typing import Optional, List
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 import torch
-from data import TrainingSample
+from proofflow.data import TrainingSample
 
 MAX_OUTPUT_LEN = 500
 
@@ -96,6 +96,7 @@ class Policy:
         padded = self.tokenizer.pad(full, padding_side="right", return_attention_mask=True, return_tensors="pt")
         input_ids = padded.input_ids
         attention_mask = padded.attention_mask[:, 1:]
+        input_ids = input_ids.to(self.model.device)
         logits = self.model(input_ids)[:, :-1, :]
         labels = input_ids[:, 1:]
         labels = labels.masked_fill(~attention_mask.bool(), -100)
