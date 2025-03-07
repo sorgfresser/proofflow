@@ -20,5 +20,10 @@ poetry add <dependencyname>
 
 You also need to get the LeanDojo data. For this, obtain it from [Zenodo](https://zenodo.org/records/12740403). Unzip the file in the root folder of this repo, such that `leandojo_benchmark_4` is on the same level as `leanproject` and `proofflow`. 
 
+You might want to run torch with cuda binaries. In that case, simply replace the line on torch with a one without source
+```bash
+sed -i '/^torch = { version = "2\.6\.0"/ s/.*/torch = "^2.6.0"/' pyproject.toml && rm poetry.lock && poetry lock
+```
+
 # Usage
 
