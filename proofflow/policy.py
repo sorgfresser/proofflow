@@ -1,8 +1,9 @@
 from torch import nn
 from typing import Optional, List
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, BatchEncoding
 import torch
 from proofflow.data import TrainingSample
+from pathlib import Path
 
 MAX_OUTPUT_LEN = 500
 
@@ -82,6 +83,17 @@ class Policy:
                 self.proof_step_id]
         return [self.proof_state_id] + state_ids + [self.proof_step_id]
 
+    def _forward(self, batch: BatchEncoding) -> tuple[torch.Tensor, torch.Tensor]:
+        input_ids = batch.input_ids
+        attention_mask = batch.attention_mask[:, 1:]
+        input_ids = input_ids.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+        logits = self.model(input_ids)[:, :-1, :]
+        labels = input_ids[:, 1:]
+        labels = labels.masked_fill(~attention_mask.bool(), -100)
+        return logits, labels
+
+
     def train_batch(self, batch: list[TrainingSample], loss_on_prompt: bool = False):
         """Train on one single batch of training samples.
 
@@ -96,15 +108,40 @@ class Policy:
             "input_ids": [prompt + tactic + [self.eos_token] for prompt, tactic in zip(prompts, tactics, strict=True)]}
 
         padded = self.tokenizer.pad(full, padding_side="right", return_attention_mask=True, return_tensors="pt")
-        input_ids = padded.input_ids
-        attention_mask = padded.attention_mask[:, 1:]
-        input_ids = input_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
-        logits = self.model(input_ids)[:, :-1, :]
-        labels = input_ids[:, 1:]
-        labels = labels.masked_fill(~attention_mask.bool(), -100)
+        logits, labels = self._forward(padded)
         # Only compute loss for the part after the prompt
         if not loss_on_prompt:
             for i in range(len(prompts)):
                 labels[i, :len(prompts[i]) - 1] = -100
         return self.loss_fn(logits.transpose(2, 1), labels)
+
+    def evaluate_batch(self, batch: list[TrainingSample]) -> dict[str, float]:
+        """Evaluate on one single batch of training samples.
+
+        :param batch: The batch to evaluate on
+        :return: The metrics
+        """
+        prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far) for sample in batch]
+        tactics = [self.tokenizer.encode(sample.tactic) for sample in batch]
+
+        full = {
+            "input_ids": [prompt + tactic + [self.eos_token] for prompt, tactic in zip(prompts, tactics, strict=True)]}
+
+        padded = self.tokenizer.pad(full, padding_side="right", return_attention_mask=True, return_tensors="pt")
+        logits, labels = self._forward(padded)
+        # Only compute loss for the part after the prompt
+        for i in range(len(prompts)):
+            labels[i, :len(prompts[i]) - 1] = -100
+        loss = self.loss_fn(logits.transpose(2, 1), labels)
+        # Exact match
+        is_correct: torch.Tensor = logits.argmax(dim=-1) == labels
+        # Ignore padding
+        accuracy = (is_correct.sum().item() / (is_correct.numel() - (labels == -100).sum())).item()
+        return {"loss": loss.item(), "perplexity": loss.exp().item(), "accuracy": accuracy}
+
+    def save(self, path: str | Path):
+        torch.save(self.model.state_dict(), path)
+
+    def load(self, path: str | Path):
+        self.model.load_state_dict(torch.load(path))
+        self.model.eval()

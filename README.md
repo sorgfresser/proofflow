@@ -25,5 +25,12 @@ You might want to run torch with cuda binaries. In that case, simply replace the
 sed -i '/^torch = { version = "2\.6\.0"/ s/.*/torch = "^2.6.0"/' pyproject.toml && rm poetry.lock && poetry lock
 ```
 
+And finally, install mamba using the following command:
+```bash
+poetry run pip3 install setuptools wheel packaging
+poetry run pip3 install --no-use-pep517 causal-conv1d
+poetry run pip3 install mamba-ssm
+```
+
 # Usage
 
