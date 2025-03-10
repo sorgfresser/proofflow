@@ -96,7 +96,7 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                 nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
-            if current_step % eval_steps == 0:
+            if (current_step + 1) % eval_steps == 0:
                 metrics = evaluate(policy, valid_data, 3)
                 metrics = {f"validation/{key}": value for key, value in metrics.items()}
                 wandb.log(metrics)
