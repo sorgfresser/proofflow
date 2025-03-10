@@ -90,7 +90,7 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
     for epoch in range(3):
         for batch in tqdm(data_loader):
             loss = policy.train_batch(batch) / gradient_accumulation_steps
-            wandb.log({"train/loss": loss}, step=current_step)
+            wandb.log({"train/loss": loss, "epoch": current_step / len(data_loader)}, step=current_step)
             loss.backward()
             if (current_step + 1) % gradient_accumulation_steps == 0:
                 nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
