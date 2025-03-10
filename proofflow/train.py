@@ -90,7 +90,7 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
     for epoch in range(3):
         for batch in tqdm(data_loader):
             loss = policy.train_batch(batch) / gradient_accumulation_steps
-            wandb.log({"loss": loss})
+            wandb.log({"train/loss": loss})
             loss.backward()
             if (current_step + 1) % gradient_accumulation_steps == 0:
                 nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
@@ -98,12 +98,17 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                 optimizer.zero_grad()
             if current_step % eval_steps == 0:
                 metrics = evaluate(policy, valid_data, 3)
+                metrics = {f"validation/{key}": value for key, value in metrics.items()}
                 wandb.log(metrics)
                 print(metrics)
             current_step += 1
         print(f"Epoch {epoch} done")
         print("Saving model")
         policy.save(Path("model.pt"))
+    print("Training done")
+    metrics = evaluate(policy, valid_data, 3)
+    metrics = {f"validation/{key}": value for key, value in metrics.items()}
+    wandb.log(metrics)
 
 
 def main():
