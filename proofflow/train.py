@@ -72,17 +72,18 @@ def collate_train_samples(batch: list[TrainingSample]):
 def evaluate(policy: Policy, data: TrainSampleDataset, eval_batch_size: int = 64) -> dict[str, float]:
     metrics = defaultdict(float)
     print("Evaluating")
-    for batch in tqdm(DataLoader(data, batch_size=eval_batch_size, shuffle=True, collate_fn=collate_train_samples)):
-        metrics_batch = policy.evaluate_batch(batch)
-        for key, value in metrics_batch.items():
-            metrics[key] += value
-    for key in metrics:
-        metrics[key] /= len(data) / eval_batch_size
+    with torch.no_grad():
+        for batch in tqdm(DataLoader(data, batch_size=eval_batch_size, shuffle=True, collate_fn=collate_train_samples)):
+            metrics_batch = policy.evaluate_batch(batch)
+            for key, value in metrics_batch.items():
+                metrics[key] += value
+        for key in metrics:
+            metrics[key] /= len(data) / eval_batch_size
     return metrics
 
 
 def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimizer, gradient_accumulation_steps: int,
-               batch_size: int, eval_steps: int, valid_data: TrainSampleDataset, device: str):
+               batch_size: int, eval_steps: int, valid_data: TrainSampleDataset, eval_batch_size: int = 4):
     data_loader = DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=collate_train_samples)
     policy.model.train()
     optimizer.zero_grad()
@@ -97,7 +98,7 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                 optimizer.step()
                 optimizer.zero_grad()
             if (current_step + 1) % eval_steps == 0:
-                metrics = evaluate(policy, valid_data, 3)
+                metrics = evaluate(policy, valid_data, eval_batch_size)
                 metrics = {f"validation/{key}": value for key, value in metrics.items()}
                 wandb.log(metrics, step=current_step)
                 print(metrics)
@@ -106,7 +107,7 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
         print("Saving model")
         policy.save(Path("model.pt"))
     print("Training done")
-    metrics = evaluate(policy, valid_data, 3)
+    metrics = evaluate(policy, valid_data, eval_batch_size)
     metrics = {f"validation/{key}": value for key, value in metrics.items()}
     wandb.log(metrics)
 
@@ -139,7 +140,7 @@ def main():
     eval_steps = 10_000
     optimizer = optim.AdamW(model.parameters())
     wandb.init(project="proofflow")
-    train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data, device)
+    train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data, 4)
 
 
 if __name__ == '__main__':
