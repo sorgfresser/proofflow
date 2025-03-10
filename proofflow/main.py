@@ -1,27 +1,10 @@
 from lean_repl_py import LeanREPLHandler
 from proofflow.policy import Policy
-from torch import nn
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from mamba_ssm.models.config_mamba import MambaConfig
+import torch
 
 
-class Model(nn.Module):
-    def __init__(self, vocab_size: int):
-        super().__init__()
-        self.act = nn.LeakyReLU()
-        self.emb = nn.Embedding(vocab_size, 30)
-        self.lstm1 = nn.LSTM(30, 30, 1)
-        self.linear1 = nn.Linear(30, 50)
-        self.lstm2 = nn.LSTM(50, 50, 1)
-        self.linear2 = nn.Linear(50, vocab_size)
-
-    def forward(self, x):
-        assert len(x.shape) == 1  # [seq_len], no batch dim
-        x = self.emb(x)
-        x, _ = self.lstm1(x)
-        x = self.linear1(x)
-        x = self.act(x)
-        x, _ = self.lstm2(x)
-        return self.linear2(x)
 
 
 handler = LeanREPLHandler()
@@ -38,18 +21,19 @@ handler.send_tactic("constructor", proof_state.proof_state)
 
 response, _ = handler.receive_json()
 
-tokenizer = AutoTokenizer.from_pretrained("kaiyuy/leandojo-lean4-tacgen-byt5-small")  # reprover
-
-# Vocab size is 256, but we use the extra special tokens at 260, so I increase this to 263
-model = Model(263)
+tokenizer = PreTrainedTokenizerFast(tokenizer_file="lean_tokenizer.json")
+eos_id = tokenizer.added_tokens_encoder["[EOS]"]
+proofstate_id = tokenizer.added_tokens_encoder["[PROOFSTATE]"]
+proofstep_id = tokenizer.added_tokens_encoder["[PROOFSTEP]"]
+tactics_id = tokenizer.added_tokens_encoder["[TACTICS]"]
+tactics_sep_id = tokenizer.added_tokens_encoder["[SEP]"]
+tokenizer.pad_token = "[PAD]"
 eos_token = tokenizer.eos_token_id
-# The ids starting at 259 are unused in regular t5, so I simply use them for our special cases
-proof_step_id = 259
-goal_id = 260
-tactics_id = 261
-tactics_sep_id = 262
+config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=12, d_model=240)
 
-policy = Policy(model, eos_token, proof_step_id, goal_id, tactics_id, tactics_sep_id, tokenizer)
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-print(policy.next_tactic(response.goals[0]))
+policy = Policy.mamba_from_file("../model_small.pt", config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, tokenizer, device)
+
+print(policy.next_tactics(response.goals[0], k=10))
 print(policy.next_tactic(response.goals[0], temperature=0.1))

@@ -4,8 +4,15 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, BatchEnco
 import torch
 from proofflow.data import TrainingSample
 from pathlib import Path
+from mamba_ssm.models.config_mamba import MambaConfig
+from mamba_ssm import MambaLMHeadModel
 
 MAX_OUTPUT_LEN = 500
+
+
+class MambaLMHeadModelWrapper(MambaLMHeadModel):
+   def forward(self, x):
+       return super().forward(x).logits
 
 
 class Policy:
@@ -39,7 +46,7 @@ class Policy:
         self.tactics_id = tactics_id
         self.tactics_sep_id = tactics_sep_id
         self.tokenizer = tokenizer
-        self.softmax = nn.Softmax()
+        self.softmax = nn.Softmax(dim=1)
         self.loss_fn = nn.CrossEntropyLoss()
         self.device = device
 
@@ -53,23 +60,52 @@ class Policy:
         :return: The subsequent tactic
         """
         prompt = self._build_prompt(proof_state, tactics_so_far)
-        prompt_tensor = torch.tensor(prompt)
+        prompt_tensor = torch.tensor(prompt).to(self.device)[None]
         token = None
         tactic = []
         idx = 0
         while token != self.eos_token and idx < MAX_OUTPUT_LEN:
-            logits = self.model(prompt_tensor)[
-                -1]  # we only use the final one, the rest is previous tokens only used in training
+            logits = self.model(prompt_tensor)[:,-1,...]  # we only use the final one, the rest is previous tokens only used in training
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
-                token = torch.multinomial(softmaxed, 1).squeeze()
+                token = torch.multinomial(softmaxed, 1).squeeze(1)
             else:
-                token = logits.argmax(dim=0)
-            prompt_tensor = torch.cat([prompt_tensor, token[None]])
+                token = logits.argmax(dim=1)
+            prompt_tensor = torch.cat([prompt_tensor, token[None]], dim=1)
             tactic.append(token.item())
             idx += 1
         tactic.pop(-1)
         return self.tokenizer.decode(tactic)
+
+    def next_tactics(self, proof_state: str, k: int, tactics_so_far: Optional[List[str]] = None,
+                    temperature: float = 0.0) -> List[str]:
+        """Predict the subsequent tactics for the given proof state (which might have multiple goals)
+
+        :param proof_state: The proof state used to predict the tactics for.
+        :param k: The number of tactics to predict
+        :param tactics_so_far: Optional list of tactics so far
+        :param temperature: The temperature to use, 0 for greedy sampling
+        :return: The subsequent tactics
+        """
+        prompt = self._build_prompt(proof_state, tactics_so_far)
+        prompt_tensor = torch.tensor(prompt).to(self.device).repeat(k, 1)
+        tokens = None
+        tactics = []
+        idx = 0
+        while tokens is None or (tokens != self.eos_token).any() and idx < MAX_OUTPUT_LEN:
+            logits = self.model(prompt_tensor)[:, -1, ...]
+            if temperature > 0.0:
+                softmaxed = self.softmax(logits / temperature)
+                tokens = torch.multinomial(softmaxed, 1).squeeze(1)
+            else:
+                tokens = logits.argmax(dim=1)
+            prompt_tensor = torch.cat([prompt_tensor, tokens[:, None]], dim=1)
+            tactics.append(tokens)
+            idx += 1
+        tactics = torch.stack(tactics, dim=1)
+        tactics = tactics[:, :-1]
+        return [self.tokenizer.decode(tactic) for tactic in tactics]
+
 
     def _build_prompt(self, proof_state: str, tactics_so_far: Optional[List[str]] = None) -> List[int]:
         state_ids: List[int] = self.tokenizer.encode(proof_state)
@@ -92,7 +128,6 @@ class Policy:
         labels = input_ids[:, 1:]
         labels = labels.masked_fill(~attention_mask.bool(), -100)
         return logits, labels
-
 
     def train_batch(self, batch: list[TrainingSample], loss_on_prompt: bool = False):
         """Train on one single batch of training samples.
@@ -145,3 +180,18 @@ class Policy:
     def load(self, path: str | Path):
         self.model.load_state_dict(torch.load(path))
         self.model.eval()
+
+    @classmethod
+    def from_file(cls, path: str | Path, eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
+                  tactics_sep_id: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
+        model = torch.load(path, map_location=device)
+        model.eval()
+        return cls(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, tokenizer, device)
+
+    @classmethod
+    def mamba_from_file(cls, path: str | Path, mamba_config: MambaConfig, eos_id: int, proof_step_id: int,
+                        proof_state_id: int, tactics_id: int, tactics_sep_id: int,
+                        tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
+        model = MambaLMHeadModelWrapper(mamba_config, device=device)
+        model.load_state_dict(torch.load(path, map_location=device))
+        return cls(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, tokenizer, device)

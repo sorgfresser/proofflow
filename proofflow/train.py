@@ -6,12 +6,11 @@ from proofflow.model.ffm import FFM
 from proofflow.data import parse_json, LEAN_DOJO_PATH, TheoremDataset, TrainSampleDataset, TrainingSample
 from pathlib import Path
 from torch.utils.data import DataLoader
-from proofflow.policy import Policy
+from proofflow.policy import Policy, MambaLMHeadModelWrapper
 from transformers import PreTrainedTokenizerFast
 import torch.optim as optim
 import wandb
 from mamba_ssm.models.config_mamba import MambaConfig
-from mamba_ssm import MambaLMHeadModel
 from tqdm import tqdm
 
 
@@ -44,8 +43,8 @@ class Model(nn.Module):
         self.emb = nn.Embedding(vocab_size, 20)
         self.norm = nn.LayerNorm(20)
         self.dropout = nn.Dropout(p=0.1)
-        #self.block1 = ModelBlock(20, 20, 64, 3, 3, 0.1)
-        #self.block2 = ModelBlock(20, 20, 64, 3, 3, 0.1)
+        # self.block1 = ModelBlock(20, 20, 64, 3, 3, 0.1)
+        # self.block2 = ModelBlock(20, 20, 64, 3, 3, 0.1)
         self.block3 = ModelBlock(20, vocab_size, 64, 3, 3, 0.1)
 
     def forward(self, x):
@@ -55,14 +54,9 @@ class Model(nn.Module):
         x = self.emb(x)  # [batch_dim, seq_len, emb_dim]
         x = self.norm(x)
         x = self.dropout(x)
-        #x = self.block1(x)
-        #x = self.block2(x)
+        # x = self.block1(x)
+        # x = self.block2(x)
         return self.block3(x)
-
-
-class MambaLMHeadModelWrapper(MambaLMHeadModel):
-   def forward(self, x):
-       return super().forward(x).logits
 
 
 def collate_train_samples(batch: list[TrainingSample]):
@@ -124,7 +118,7 @@ def main():
 
     # model = Model(tokenizer.vocab_size).to(device)
 
-    config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=30, d_model=960)
+    config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=12, d_model=240)
     model = MambaLMHeadModelWrapper(config).to(device)
 
     eos_id = tokenizer.added_tokens_encoder["[EOS]"]
@@ -139,7 +133,10 @@ def main():
     batch_size = 2
     eval_steps = 10_000
     optimizer = optim.AdamW(model.parameters())
-    wandb.init(project="proofflow")
+    config = {"gradient_accumulation_steps": gradient_accumulation_steps, "batch_size": batch_size,
+              "eval_steps": eval_steps,
+              "n_layers": 12, "d_model": 240}
+    wandb.init(project="proofflow", config=config)
     train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data, 4)
 
 
