@@ -6,13 +6,14 @@ from proofflow.data import TrainingSample
 from pathlib import Path
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm import MambaLMHeadModel
+from dataclasses import asdict
 
 MAX_OUTPUT_LEN = 500
 
 
 class MambaLMHeadModelWrapper(MambaLMHeadModel):
-   def forward(self, x):
-       return super().forward(x).logits
+    def forward(self, x):
+        return super().forward(x).logits
 
 
 class Policy:
@@ -65,7 +66,8 @@ class Policy:
         tactic = []
         idx = 0
         while token != self.eos_token and idx < MAX_OUTPUT_LEN:
-            logits = self.model(prompt_tensor)[:,-1,...]  # we only use the final one, the rest is previous tokens only used in training
+            logits = self.model(prompt_tensor)[:, -1,
+                     ...]  # we only use the final one, the rest is previous tokens only used in training
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
                 token = torch.multinomial(softmaxed, 1).squeeze(1)
@@ -78,7 +80,7 @@ class Policy:
         return self.tokenizer.decode(tactic)
 
     def next_tactics(self, proof_state: str, k: int, tactics_so_far: Optional[List[str]] = None,
-                    temperature: float = 0.0) -> List[str]:
+                     temperature: float = 0.0) -> List[str]:
         """Predict the subsequent tactics for the given proof state (which might have multiple goals)
 
         :param proof_state: The proof state used to predict the tactics for.
@@ -105,7 +107,6 @@ class Policy:
         tactics = torch.stack(tactics, dim=1)
         tactics = tactics[:, :-1]
         return [self.tokenizer.decode(tactic) for tactic in tactics]
-
 
     def _build_prompt(self, proof_state: str, tactics_so_far: Optional[List[str]] = None) -> List[int]:
         state_ids: List[int] = self.tokenizer.encode(proof_state)
@@ -175,23 +176,59 @@ class Policy:
         return {"loss": loss.item(), "perplexity": loss.exp().item(), "accuracy": accuracy}
 
     def save(self, path: str | Path):
-        torch.save(self.model.state_dict(), path)
+        state_dict = self.model.state_dict()
+        result = {"state_dict": state_dict, "eos_id": self.eos_token, "proof_step_id": self.proof_step_id,
+                  "proof_state_id": self.proof_state_id, "tactics_id": self.tactics_id,
+                  "tactics_sep_id": self.tactics_sep_id}
+        torch.save(result, path)
 
     def load(self, path: str | Path):
-        self.model.load_state_dict(torch.load(path))
+        result = torch.load(path)
+        self.eos_token = result["eos_id"]
+        self.proof_step_id = result["proof_step_id"]
+        self.proof_state_id = result["proof_state_id"]
+        self.tactics_id = result["tactics_id"]
+        self.tactics_sep_id = result["tactics_sep_id"]
+        self.model.load_state_dict(result["state_dict"])
         self.model.eval()
 
     @classmethod
-    def from_file(cls, path: str | Path, eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
-                  tactics_sep_id: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
-        model = torch.load(path, map_location=device)
+    def from_file(cls, path: str | Path, model: nn.Module, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+                  device: str = "cpu"):
+        result = torch.load(path)
+        model.load_state_dict(result["state_dict"])
+        model.to(device)
         model.eval()
-        return cls(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, tokenizer, device)
+        return cls(model, result["eos_id"], result["proof_step_id"], result["proof_state_id"], result["tactics_id"],
+                   result["tactics_sep_id"], tokenizer, device)
+
+
+class MambaPolicy(Policy):
+
+    def __init__(self, model: nn.Module, mamba_config: MambaConfig,
+                 eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
+                 tactics_sep_id: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
+        super().__init__(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, tokenizer, device)
+        self.config = mamba_config
+
+    def load(self, path: str | Path):
+        super().load(path)
+        result = torch.load(path)
+        config_dict = result["config"]
+        self.config = MambaConfig(**config_dict)
+
+    def save(self, path: str | Path):
+        state_dict = self.model.state_dict()
+        result = {"state_dict": state_dict, "eos_id": self.eos_token, "proof_step_id": self.proof_step_id,
+                  "proof_state_id": self.proof_state_id, "tactics_id": self.tactics_id,
+                  "tactics_sep_id": self.tactics_sep_id, "config": asdict(self.config)}
+        torch.save(result, path)
 
     @classmethod
-    def mamba_from_file(cls, path: str | Path, mamba_config: MambaConfig, eos_id: int, proof_step_id: int,
-                        proof_state_id: int, tactics_id: int, tactics_sep_id: int,
-                        tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
+    def from_file(cls, path: str | Path, mamba_config: MambaConfig, eos_id: int, proof_step_id: int,
+                  proof_state_id: int, tactics_id: int, tactics_sep_id: int,
+                  tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
         model = MambaLMHeadModelWrapper(mamba_config, device=device)
         model.load_state_dict(torch.load(path, map_location=device))
-        return cls(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, tokenizer, device)
+        return cls(model, mamba_config, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, tokenizer,
+                   device)
