@@ -1,5 +1,5 @@
 from lean_repl_py import LeanREPLHandler
-from proofflow.policy import Policy
+from proofflow.policy import MambaPolicy
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from mamba_ssm.models.config_mamba import MambaConfig
 import torch
@@ -33,7 +33,7 @@ config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=12, d_model=240)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-policy = Policy.mamba_from_file("../model_small.pt", config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, tokenizer, device)
+policy = MambaPolicy.from_file("../model_small.pt", config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, tokenizer, device)
 
 print(policy.next_tactics(response.goals[0], k=10))
 print(policy.next_tactic(response.goals[0], temperature=0.1))

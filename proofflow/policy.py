@@ -106,7 +106,16 @@ class Policy:
             idx += 1
         tactics = torch.stack(tactics, dim=1)
         tactics = tactics[:, :-1]
-        return [self.tokenizer.decode(tactic) for tactic in tactics]
+        tactics = tactics.tolist()
+        result_ids = []
+        for tactic in tactics:
+            result = []
+            for token in tactic:
+                if token == self.eos_token:
+                    break
+                result.append(token)
+            result_ids.append(result)
+        return self.tokenizer.batch_decode(result_ids)
 
     def _build_prompt(self, proof_state: str, tactics_so_far: Optional[List[str]] = None) -> List[int]:
         state_ids: List[int] = self.tokenizer.encode(proof_state)
