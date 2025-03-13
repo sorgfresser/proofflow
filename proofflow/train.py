@@ -83,14 +83,14 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                states_so_far: bool = False, half_precision: bool = False):
     data_loader = DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=collate_train_samples)
     policy.model.train()
-    scaler = torch.cuda.amp.GradScaler(enabled=half_precision)
+    scaler = torch.amp.GradScaler(enabled=half_precision, device=policy.device)
     optimizer.zero_grad()
     current_step = 0
     print(f"Saving model to {checkpoint_path}")
     policy.save(checkpoint_path)
     for epoch in range(epochs):
         for batch in tqdm(data_loader):
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=half_precision):
+            with torch.amp.autocast(dtype=torch.bfloat16, enabled=half_precision, device_type=policy.device):
                 loss = policy.train_batch(batch, loss_on_prompt, tactics_so_far,
                                           proof_states_so_far=states_so_far) / gradient_accumulation_steps
                 wandb.log({"train/loss": loss, "epoch": current_step / len(data_loader)}, step=current_step)
