@@ -125,8 +125,13 @@ def huber_loss(x, beta=1, i_delta=4):
 
 # retrieve the command for each proof's initial theorem
 def get_start_commands(path, handler, repo_path):  # TODO: this is insanely slow, cache this
-    for thm in parse_json(path):
+    for thm in tqdm(parse_json(path)):
+        # Dataset errors, i.e. no tactics were traced
+        if not thm.traced_tactics:
+            continue
         yield thm.to_proof_state(handler, repo_path).goal
+        print(thm.theorem_statement(repo_path))
+
 
 def train_gflownet(
         policy: Policy,

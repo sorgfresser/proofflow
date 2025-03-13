@@ -4,8 +4,14 @@ from typing import Any, Sequence, Generator
 from pydantic import BaseModel, model_validator
 from lean_repl_py import LeanREPLProofState, LeanREPLHandler
 from torch.utils.data import Dataset
+import re
 
 LEAN_DOJO_PATH = Path("../leandojo_benchmark_4/random")
+
+ATTRIBUTE_REGEX = re.compile(r"@\[\s*(?:[^\[\]]|\[(?:[^\]]|\[[^\]]*\])*\])*\]")
+BY_REGEX = re.compile(r":=\s*by\s+")
+WS = r"\s+"
+MAX_WS = r"^\s*"
 
 
 class TrainingSample(BaseModel):
@@ -76,6 +82,62 @@ def text_without_comments(text: str) -> str:
     return text_without
 
 
+def _find_leftmost_not_in_parenthesis(text, substr):
+    """
+    Get the leftmost instance of a substring that is not in a parenthesis
+    :param text: The text to search
+    :param substr: The substring to search for
+    :return: index of the substring, or -1 if not found
+    """
+    index = -1
+    parenthesis_level = 0
+    for i in range(len(text) - len(substr) + 1):
+        if text[i] == "(" or text[i] == "[" or text[i] == "{":
+            parenthesis_level += 1
+        elif text[i] == ")" or text[i] == "]" or text[i] == "}":
+            parenthesis_level -= 1
+        if text[i:i + len(substr)] == substr and parenthesis_level == 0:
+            index = i
+            break
+    return index
+
+
+def _find_rightmost_not_in_parenthesis(text, substr):
+    """
+    Get the rightmost instance of a substring that is not in a parenthesis
+    :param text: The text to search
+    :param substr: The substring to search for
+    :return: index of the substring, or -1 if not found
+    """
+    index = -1
+    parenthesis_level = 0
+    for i in range(len(text) - len(substr), -1, -1):
+        if text[i] == ")":
+            parenthesis_level += 1
+        elif text[i] == "(":
+            parenthesis_level -= 1
+        if text[i:i + len(substr)] == substr and parenthesis_level == 0:
+            index = i
+            break
+    return index
+
+
+def replace_proof(theorem: str) -> str:
+    assert theorem.startswith("theorem ")
+    by_matches = BY_REGEX.split(theorem)
+    # No by used in the proof
+    if len(by_matches) == 1:
+        idx = _find_rightmost_not_in_parenthesis(theorem, " :=")
+        # Fallback to without space
+        if idx == -1:
+            idx = _find_rightmost_not_in_parenthesis(theorem, ":=")
+        assert idx != -1
+        return theorem[:idx] + " := by sorry"
+
+    full_theorem = by_matches[0]
+    return full_theorem + " := by sorry"
+
+
 class Theorem(BaseModel):
     url: str
     commit: str
@@ -123,9 +185,17 @@ class Theorem(BaseModel):
         handler.send_file(full_path, all_tactics=True)
         response, _ = handler.receive_json()
         tactics = response["tactics"]
+        contains_error = any(msg.severity == "error" for msg in response.get("messages", []))
+        if contains_error:
+            raise RuntimeError("Error in manifesting theorem")
         for tactic in tactics:
             if tactic["pos"]["line"] >= self.start.line:
-                assert tactic["tactic"] == self.traced_tactics[0].tactic
+                compare_self = tactic["tactic"].strip().replace("\n", " ")
+                compare_self = re.sub(WS, "", compare_self)
+                compare_other = self.traced_tactics[0].tactic.strip().replace("\n", " ")
+                compare_other = re.sub(WS, "", compare_other)
+                assert compare_self == compare_other
+
                 # it says goals, but since this is the start of the proof state, should only be one
                 assert tactic["goals"].count("⊢") == 1
                 tactic["goal"] = tactic["goals"]
@@ -142,16 +212,46 @@ class Theorem(BaseModel):
     def theorem_statement(self, repo_path: Path) -> str:
         lines = self._lines(repo_path)
         if self.start.line == self.end.line:
-            full_text = lines[self.start.line - 1][self.start.column - 1:self.end.column]
+            theorem_text = lines[self.start.line - 1][self.start.column - 1:self.end.column]
         else:
-            full_text = lines[self.start.line - 1][self.start.column - 1:]
+            theorem_text = lines[self.start.line - 1][self.start.column - 1:]
             for i in range(self.start.line, self.end.line - 1):
-                full_text += lines[i]
-            full_text += lines[self.end.line - 1][:self.end.column]
-        text_wo = text_without_comments(full_text).strip()
+                theorem_text += lines[i]
+            theorem_text += lines[self.end.line - 1][:self.end.column]
+        text_wo = text_without_comments(theorem_text).strip()
+        text_wo = ATTRIBUTE_REGEX.sub("", text_wo).strip()
+        text_wo = text_wo.removeprefix("private").strip()
+        text_wo = text_wo.removeprefix("protected").strip()
+        text_wo = text_wo.removeprefix("nonrec").strip()
+
         if text_wo.startswith("lemma "):
             text_wo = text_wo.replace("lemma ", "theorem ", 1)
         assert text_wo.startswith("theorem")
+        text_wo = replace_proof(text_wo)
+
+        text_before = "\n".join(lines[:self.start.line - 1] + [lines[self.start.line - 1][:self.start.column - 1]])
+        text_before_wo = text_without_comments(text_before)
+        # Remove imports
+        # line_idx = 0
+        # for line_idx, line in enumerate(text_before_wo.split("\n")):
+        #     if not line.strip().startswith("import"):
+        #         break
+        # text_before_wo = "\n".join(text_before_wo.split("\n")[line_idx:])
+
+        # imports = self.imports(repo_path)
+        handler = LeanREPLHandler(Path("../leanproject"))
+        # handler.env = None
+        # handler.send_command("\n".join(imports))
+        # response, env = handler.receive_json()
+        # handler.env = env
+        handler.send_command(text_before_wo)
+        response, env = handler.receive_json()
+        handler.env = env
+        handler.send_command(text_wo)
+        response, env = handler.receive_json()
+        assert len(response["sorries"]) == 1
+        assert not any(msg.severity == "error" for msg in response.get("messages", []))
+        assert isinstance(response["sorries"][0], LeanREPLProofState) # asserts it worked
         return text_wo
 
     def imports(self, repo_path: Path) -> list[str]:
