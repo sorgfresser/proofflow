@@ -79,7 +79,8 @@ def evaluate(policy: Policy, data: TrainSampleDataset, eval_batch_size: int = 64
 
 def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimizer, gradient_accumulation_steps: int,
                batch_size: int, eval_steps: int, valid_data: TrainSampleDataset, checkpoint_path: Path,
-               eval_batch_size: int = 4, epochs: int = 3):
+               eval_batch_size: int = 4, epochs: int = 3, loss_on_prompt: bool = False, tactics_so_far: bool = False,
+               states_so_far: bool = False):
     data_loader = DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=collate_train_samples)
     policy.model.train()
     optimizer.zero_grad()
@@ -88,7 +89,8 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
     policy.save(checkpoint_path)
     for epoch in range(epochs):
         for batch in tqdm(data_loader):
-            loss = policy.train_batch(batch) / gradient_accumulation_steps
+            loss = policy.train_batch(batch, loss_on_prompt, tactics_so_far,
+                                      proof_states_so_far=states_so_far) / gradient_accumulation_steps
             wandb.log({"train/loss": loss, "epoch": current_step / len(data_loader)}, step=current_step)
             loss.backward()
             if (current_step + 1) % gradient_accumulation_steps == 0:
@@ -121,6 +123,12 @@ def main():
     parser.add_argument("--eval-steps", type=int, default=10_000)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=10)
     parser.add_argument("--eval-batch-size", type=int, default=4)
+    parser.add_argument("--loss-on-prompt", action="store_true", default=False,
+                        help="Compute language modeling loss on prompt")
+    parser.add_argument("--tactics-so-far", action="store_true", default=False,
+                        help="Use the tactics so far as model input")
+    parser.add_argument("--states-so-far", action="store_true", default=False,
+                        help="Use the states so far as model input")
     args = parser.parse_args()
 
     train_data = TrainSampleDataset(LEAN_DOJO_PATH / "train.json")
@@ -153,7 +161,9 @@ def main():
     incomplete_proof_token = tokenizer.added_tokens_encoder["[INC]"]
     invalid_proof_token = tokenizer.added_tokens_encoder["[INV]"]
     tokenizer.pad_token = "[PAD]"
-    policy = MambaPolicy(model, config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, tokenizer, device)
+    policy = MambaPolicy(model, config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
+                         proofstate_sep_id, goals_sep_id, successful_proof_token, incomplete_proof_token,
+                         invalid_proof_token, tokenizer, device)
 
     gradient_accumulation_steps = args.gradient_accumulation_steps
     batch_size = args.batch_size
@@ -162,7 +172,9 @@ def main():
     eval_batch_size = args.eval_batch_size
     optimizer = optim.AdamW(model.parameters())
     config = {"gradient_accumulation_steps": gradient_accumulation_steps, "batch_size": batch_size, "epochs": epochs,
-              "eval_steps": eval_steps, "n_layers": n_layers, "d_model": d_model, "eval_batch_size": eval_batch_size}
+              "eval_steps": eval_steps, "n_layers": n_layers, "d_model": d_model, "eval_batch_size": eval_batch_size,
+              "loss_on_prompt": args.loss_on_prompt, "tactics_so_far": args.tactics_so_far,
+              "states_so_far": args.states_so_far}
     wandb.init(project="proofflow", config=config)
     train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data,
                Path(args.checkpoint_path), eval_batch_size=eval_batch_size, epochs=epochs)

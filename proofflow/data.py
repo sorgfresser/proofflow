@@ -21,6 +21,7 @@ class TrainingSample(BaseModel):
     proof_state: str
     tactic: str
     tactics_so_far: list[str]
+    proof_states_so_far: list[str]
 
 
 class Position(BaseModel):
@@ -175,10 +176,13 @@ class Theorem(BaseModel):
         #     assert ordered[i].state_after == ordered[i+1].state_before or ordered[i].state_after == "no goals"
         #
         tactics_so_far = []
+        proof_states_so_far = []
         # for tactic in ordered:
         for tactic in self.traced_tactics:
-            yield TrainingSample(proof_state=tactic.state_before, tactic=tactic.tactic, tactics_so_far=tactics_so_far)
+            yield TrainingSample(proof_state=tactic.state_before, tactic=tactic.tactic, tactics_so_far=tactics_so_far,
+                                 proof_states_so_far=proof_states_so_far)
             tactics_so_far.append(tactic.tactic)
+            proof_states_so_far.append(tactic.state_before)
 
     def to_proof_state(self, handler: LeanREPLHandler, repo_path: Path) -> LeanREPLProofState:
         """Manifest the theorem in the Lean REPL and return the corresponding proof state.

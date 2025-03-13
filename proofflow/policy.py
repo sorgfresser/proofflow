@@ -8,8 +8,6 @@ from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm import MambaLMHeadModel
 from dataclasses import asdict
 
-MAX_OUTPUT_LEN = 500
-
 
 class MambaLMHeadModelWrapper(MambaLMHeadModel):
 
@@ -217,14 +215,24 @@ class Policy:
         labels = labels.masked_fill(~attention_mask.bool(), -100)
         return logits, labels
 
-    def train_batch(self, batch: list[TrainingSample], loss_on_prompt: bool = False):
+    def train_batch(self, batch: list[TrainingSample], loss_on_prompt: bool = False, tactics_so_far: bool = False,
+                    proof_states_so_far: bool = False) -> torch.Tensor:
         """Train on one single batch of training samples.
 
-        :param batch:
+        :param batch: The batch to train on
         :param loss_on_prompt: Whether to also compute language modelling loss on prompt tokens.
+        :param tactics_so_far: Whether to condition on tactics so far
+        :param proof_states_so_far: Whether to condition on proof states so far
         :return:
         """
-        prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far) for sample in batch]
+        if tactics_so_far and proof_states_so_far:
+            prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far, sample.proof_states_so_far) for sample in batch]
+        elif tactics_so_far:
+            prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far) for sample in batch]
+        elif proof_states_so_far:
+            prompts = [self._build_prompt(sample.proof_state, proof_states_so_far=sample.proof_states_so_far) for sample in batch]
+        else:
+            prompts = [self._build_prompt(sample.proof_state) for sample in batch]
         tactics = [self.tokenizer.encode(sample.tactic) for sample in batch]
 
         full = {
