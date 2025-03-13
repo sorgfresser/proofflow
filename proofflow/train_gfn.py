@@ -22,7 +22,7 @@ from argparse import ArgumentParser
 
 MAX_TRAJ_LEN = 10
 MAX_OUTPUT_LEN = 20
-GET_STATE_EVERY = 1  # we want semantically similar proofs to have the same states. Increasing this helps to do that
+GET_STATE_EVERY = 2  # we want semantically similar proofs to have the same states. Increasing this helps to do that
 TEMPERATURE = 1
 
 
@@ -85,7 +85,7 @@ class Model(nn.Module):
         return lm_logits
 
     def get_non_z_params(self):
-        return self.parameters()
+        return [i for i in self.parameters() if all(id(i) != id(j) for j in self.get_z_params())]
 
     def get_z_params(self):
         return self.z_head[0].parameters()
@@ -185,7 +185,7 @@ def train_gflownet(
     for r in range(rounds):
         # Reset the handler to avoid memory leaks
         handler = handler_factory()
-        # Pretty sure that this is not compatible with gradient accumulation, because we discard the gradients here
+
         with torch.no_grad():
 
             # 0. add new trajectories to the replay buffer
@@ -272,7 +272,7 @@ def train_gflownet(
                     has_error = has_error or "messages" in response and any(m.severity == "error" for m in response["messages"])
 
                     if has_error:
-                        log_rewards[i] = log(0.01)  # proof complete
+                        log_rewards[i] = log(0.01)  # proof failed
                         done[i] = True
                         state_trajectories[i].append([policy.invalid_proof_token])
                         j += 1
@@ -345,7 +345,7 @@ def train_gflownet(
                     with torch.autocast(device_type=device, dtype=torch.float16):
                         # these are the forward and backward probability estimates for each token
                         log_p_f[idx] += policy.softmax(policy.model(torch.tensor([fwd_input]).to(device))[0, -1] / TEMPERATURE)[t].log()
-                        log_p_b[idx] += policy.softmax(policy.model(torch.tensor([bck_input]).to(device))[0, -1] / TEMPERATURE)[t].log()
+                        log_p_b[idx] += policy.softmax(policy.model.p_b(torch.tensor([bck_input]).to(device))[0, -1] / TEMPERATURE)[t].log()
 
                     fwd_input += t
                     bck_input += t
@@ -354,6 +354,8 @@ def train_gflownet(
 
         # 3. compute TB loss with TLM backward policy
 
+        log_rewards_tensor = torch.tensor(log_rewards, device=device)
+
         batch_idx = torch.arange(len(traj_lens), device=device).repeat_interleave(traj_lens)
 
         traj_log_p_F = scatter(log_p_f, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
@@ -361,7 +363,7 @@ def train_gflownet(
 
         back_loss = traj_log_p_B.mean()
         traj_log_p_B = traj_log_p_B.detach()
-        log_rewards_tensor = torch.tensor(log_rewards, device=device)
+
         traj_diffs = (log_z + traj_log_p_F) - (log_rewards_tensor + traj_log_p_B)
         tb_loss = huber_loss(traj_diffs).mean()
 
@@ -392,7 +394,7 @@ def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTr
         for tactic in thm.traced_tactics:
             new_state = tokenizer.encode(tactic.state_before)
             # TODO: substitute this with policy.build_prompt()
-            states.append(new_state) if not states else states.append([tokenizer.added_tokens_encoder["[STATESEP]"] ]+ new_state)
+            states.append(new_state) if not states else states.append([tokenizer.added_tokens_encoder["[STATESEP]"] ] + new_state)
             actions.append(tokenizer.encode(tactic.tactic) + [tokenizer.added_tokens_encoder["[EOS]"]])
             trajectory = (states.copy(), actions.copy())
             precomputed_trajectories.append(trajectory)

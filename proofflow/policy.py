@@ -32,6 +32,12 @@ class MambaLMHeadModelWrapper(MambaLMHeadModel):
         lm_logits = self.z_head(hidden_states)
         return lm_logits
 
+    def get_non_z_params(self):
+        return [i for i in self.parameters() if all(id(i) != id(j) for j in self.get_z_params())]
+
+    def get_z_params(self):
+        return self.z_head[0].parameters()
+
 
 class Policy:
     """
