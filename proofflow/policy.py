@@ -12,8 +12,25 @@ MAX_OUTPUT_LEN = 500
 
 
 class MambaLMHeadModelWrapper(MambaLMHeadModel):
+
+    def __init__(self, config, *args, device=None, dtype=None, **kwargs):
+        super().__init__(config, *args, device=device, dtype=dtype, **kwargs)
+
+        self.back_head = nn.Linear(config.d_model, config.vocab_size, bias=False, device=device, dtype=dtype)
+        self.z_head = nn.Linear(config.d_model, 1, bias=True, device=device, dtype=dtype)
+
     def forward(self, x):
         return super().forward(x).logits
+
+    def p_b(self, input_ids):
+        hidden_states = self.backbone(input_ids)
+        back_logits = self.back_head(hidden_states)
+        return back_logits
+
+    def log_z(self, input_ids):
+        hidden_states = self.backbone(input_ids)[:, -1]
+        lm_logits = self.z_head(hidden_states)
+        return lm_logits
 
 
 class Policy:
@@ -28,7 +45,9 @@ class Policy:
     """
 
     def __init__(self, model: nn.Module, eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
-                 tactics_sep_id: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
+                 tactics_sep_id: int, proofstate_sep_id: int, goals_sep_id: int, successful_proof_token: int,
+                 incomplete_proof_token: int, invalid_proof_token: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+                 device: str = "cpu"):
         """
 
         :param model: The underlying model to use
@@ -46,6 +65,11 @@ class Policy:
         self.proof_state_id = proof_state_id
         self.tactics_id = tactics_id
         self.tactics_sep_id = tactics_sep_id
+        self.proofstate_sep_id = proofstate_sep_id
+        self.goals_sep_id = goals_sep_id
+        self.successful_proof_token = successful_proof_token
+        self.incomplete_proof_token = incomplete_proof_token
+        self.invalid_proof_token = invalid_proof_token
         self.tokenizer = tokenizer
         self.softmax = nn.Softmax(dim=1)
         self.loss_fn = nn.CrossEntropyLoss()
@@ -216,8 +240,11 @@ class MambaPolicy(Policy):
 
     def __init__(self, model: nn.Module, mamba_config: MambaConfig,
                  eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
-                 tactics_sep_id: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
-        super().__init__(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, tokenizer, device)
+                 tactics_sep_id: int, proofstate_sep_id: int, goals_sep_id: int, successful_proof_token: int,
+                 incomplete_proof_token: int, invalid_proof_token: int, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+                 device: str = "cpu"):
+        super().__init__(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, goals_sep_id, proofstate_sep_id,
+                         successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
         self.config = mamba_config
 
     def load(self, path: str | Path):
@@ -229,15 +256,19 @@ class MambaPolicy(Policy):
     def save(self, path: str | Path):
         state_dict = self.model.state_dict()
         result = {"state_dict": state_dict, "eos_id": self.eos_token, "proof_step_id": self.proof_step_id,
-                  "proof_state_id": self.proof_state_id, "tactics_id": self.tactics_id,
-                  "tactics_sep_id": self.tactics_sep_id, "config": asdict(self.config)}
+                  "proof_state_id": self.proof_state_id, "proofstate_sep_id": self.proofstate_sep_id,
+                  "tactics_id": self.tactics_id, "tactics_sep_id": self.tactics_sep_id,
+                  "proofstate_sep_id": self.proofstate_sep_id, "goals_sep_id": self.goals_sep_id,
+                  "successful_proof_token": self.successful_proof_token, "incomplete_proof_token": self.incomplete_proof_token,
+                  "invalid_proof_token": self.invalid_proof_token, "config": asdict(self.config)}
         torch.save(result, path)
 
     @classmethod
     def from_file(cls, path: str | Path, mamba_config: MambaConfig, eos_id: int, proof_step_id: int,
-                  proof_state_id: int, tactics_id: int, tactics_sep_id: int,
+                  proof_state_id: int, tactics_id: int, tactics_sep_id: int, proofstate_sep_id: int, goals_sep_id: int,
+                  successful_proof_token: int, incomplete_proof_token: int, invalid_proof_token: int,
                   tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
         model = MambaLMHeadModelWrapper(mamba_config, device=device)
         model.load_state_dict(torch.load(path, map_location=device))
-        return cls(model, mamba_config, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, tokenizer,
-                   device)
+        return cls(model, mamba_config, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, proofstate_sep_id,
+                   goals_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
