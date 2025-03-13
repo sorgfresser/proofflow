@@ -124,9 +124,9 @@ def huber_loss(x, beta=1, i_delta=4):
     return torch.where(ax <= beta, 0.5 * x * x, beta * (ax - beta / 2)) * i_delta
 
 # retrieve the command for each proof's initial theorem
-def get_start_commands(path):  # TODO: pretty sure this is is wrong
+def get_start_commands(path, handler, repo_path):  # TODO: this is insanely slow, cache this
     for thm in parse_json(path):
-        yield thm.theorem_statement(Path("../mathlib4"))
+        yield thm.to_proof_state(handler, repo_path).goal
 
 def train_gflownet(
         policy: Policy,
@@ -159,7 +159,7 @@ def train_gflownet(
             # 0. add new trajectories to the replay buffer
 
             idxs = torch.randint(0, len(selected_start_commands), (batch_size_replay,))
-            selected_start_commands = [c for c in enumerate(start_commands) if c in idxs]
+            selected_start_commands = [s for c, s in enumerate(start_commands) if c in idxs]
 
             handlers = []
             start_states = []
@@ -364,7 +364,9 @@ def main():
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     args = parser.parse_args()
 
-    start_commands = list(get_start_commands(LEAN_DOJO_PATH / "train.json"))
+
+    handler = LeanREPLHandler(Path("../leanproject"))
+    start_commands = list(get_start_commands(LEAN_DOJO_PATH / "train.json", handler, Path("../mathlib4")))
 
     tokenizer = PreTrainedTokenizerFast(tokenizer_file="lean_tokenizer.json")
 
