@@ -80,22 +80,26 @@ def evaluate(policy: Policy, data: TrainSampleDataset, eval_batch_size: int = 64
 def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimizer, gradient_accumulation_steps: int,
                batch_size: int, eval_steps: int, valid_data: TrainSampleDataset, checkpoint_path: Path,
                eval_batch_size: int = 4, epochs: int = 3, loss_on_prompt: bool = False, tactics_so_far: bool = False,
-               states_so_far: bool = False):
+               states_so_far: bool = False, half_precision: bool = False):
     data_loader = DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=collate_train_samples)
     policy.model.train()
+    scaler = torch.cuda.amp.GradScaler(enabled=half_precision)
     optimizer.zero_grad()
     current_step = 0
     print(f"Saving model to {checkpoint_path}")
     policy.save(checkpoint_path)
     for epoch in range(epochs):
         for batch in tqdm(data_loader):
-            loss = policy.train_batch(batch, loss_on_prompt, tactics_so_far,
-                                      proof_states_so_far=states_so_far) / gradient_accumulation_steps
-            wandb.log({"train/loss": loss, "epoch": current_step / len(data_loader)}, step=current_step)
-            loss.backward()
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=half_precision):
+                loss = policy.train_batch(batch, loss_on_prompt, tactics_so_far,
+                                          proof_states_so_far=states_so_far) / gradient_accumulation_steps
+                wandb.log({"train/loss": loss, "epoch": current_step / len(data_loader)}, step=current_step)
+            scaler.scale(loss).backward()
             if (current_step + 1) % gradient_accumulation_steps == 0:
+                scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
             if (current_step + 1) % eval_steps == 0:
                 metrics = evaluate(policy, valid_data, eval_batch_size)
@@ -129,6 +133,8 @@ def main():
                         help="Use the tactics so far as model input")
     parser.add_argument("--states-so-far", action="store_true", default=False,
                         help="Use the states so far as model input")
+    parser.add_argument("--half-precision", action="store_true", default=False,
+                        help="Use half precision for training")
     args = parser.parse_args()
 
     train_data = TrainSampleDataset(LEAN_DOJO_PATH / "train.json")
@@ -173,11 +179,12 @@ def main():
     config = {"gradient_accumulation_steps": gradient_accumulation_steps, "batch_size": batch_size, "epochs": epochs,
               "eval_steps": eval_steps, "n_layers": n_layers, "d_model": d_model, "eval_batch_size": eval_batch_size,
               "loss_on_prompt": args.loss_on_prompt, "tactics_so_far": args.tactics_so_far,
-              "states_so_far": args.states_so_far}
+              "states_so_far": args.states_so_far, "half_precision": args.half_precision}
     wandb.init(project="proofflow", config=config)
     train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data,
                Path(args.checkpoint_path), eval_batch_size=eval_batch_size, epochs=epochs,
-               loss_on_prompt=args.loss_on_prompt, tactics_so_far=args.tactics_so_far, states_so_far=args.states_so_far)
+               loss_on_prompt=args.loss_on_prompt, tactics_so_far=args.tactics_so_far, states_so_far=args.states_so_far,
+               half_precision=args.half_precision)
     wandb.finish(exit_code=0)
 
 
