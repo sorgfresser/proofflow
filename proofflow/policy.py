@@ -45,7 +45,7 @@ class Policy:
     """
 
     def __init__(self, model: nn.Module, eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
-                 tactics_sep_id: int, proofstate_sep_id: int, goals_sep_id: int, successful_proof_token: int,
+                 tactics_sep_id: int, proofstate_sep_id: int, successful_proof_token: int,
                  incomplete_proof_token: int, invalid_proof_token: int,
                  tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
                  device: str = "cpu"):
@@ -67,7 +67,6 @@ class Policy:
         self.tactics_id = tactics_id
         self.tactics_sep_id = tactics_sep_id
         self.proofstate_sep_id = proofstate_sep_id
-        self.goals_sep_id = goals_sep_id
         self.successful_proof_token = successful_proof_token
         self.incomplete_proof_token = incomplete_proof_token
         self.invalid_proof_token = invalid_proof_token
@@ -76,9 +75,10 @@ class Policy:
         self.loss_fn = nn.CrossEntropyLoss()
         self.device = device
 
-    def next_tactic(self, proof_states: Union[List[str], str], tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
-                          previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
-                          temperature: float = 0.0, max_new_tokens: int = 20) -> Union[List[str], str]:
+    def next_tactic(self, proof_states: Union[List[str], str],
+                    tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
+                    previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
+                    temperature: float = 0.0, max_new_tokens: int = 20) -> Union[List[str], str]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
 
         :param proof_states: The proof states used to predict the tactics for.
@@ -129,7 +129,8 @@ class Policy:
             return self.tokenizer.decode(result_ids[0])
         return self.tokenizer.batch_decode(result_ids)
 
-    def next_tactics(self, proof_states: Union[List[str], str], k: int, tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
+    def next_tactics(self, proof_states: Union[List[str], str], k: int,
+                     tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                      previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
                      temperature: float = 0.0, max_new_tokens: int = 20) -> Union[List[List[str]], List[str]]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
@@ -151,13 +152,14 @@ class Policy:
             assert not previous_proof_states or isinstance(previous_proof_states[0], str)
             previous_proof_states = [previous_proof_states] if previous_proof_states is not None else None
 
-
         prompts = [self._build_prompt(proof_state, tactics_so_far, previous_proof_states) for proof_state in
-                     proof_states]
+                   proof_states]
         prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_attention_mask=True,
                                             return_tensors="pt")
         # Will repeat the prompt k times for each proof state one by one
-        prompt_tensor = prompt_results.input_ids.to(self.device)[None].repeat(k, 1, 1).transpose(0, 1).reshape(-1, prompt_results.input_ids.shape[1])
+        prompt_tensor = prompt_results.input_ids.to(self.device)[None].repeat(k, 1, 1).transpose(0, 1).reshape(-1,
+                                                                                                               prompt_results.input_ids.shape[
+                                                                                                                   1])
         tokens = None
         tactics = []
         idx = 0
@@ -226,11 +228,13 @@ class Policy:
         :return:
         """
         if tactics_so_far and proof_states_so_far:
-            prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far, sample.proof_states_so_far) for sample in batch]
+            prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far, sample.proof_states_so_far) for
+                       sample in batch]
         elif tactics_so_far:
             prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far) for sample in batch]
         elif proof_states_so_far:
-            prompts = [self._build_prompt(sample.proof_state, proof_states_so_far=sample.proof_states_so_far) for sample in batch]
+            prompts = [self._build_prompt(sample.proof_state, proof_states_so_far=sample.proof_states_so_far) for sample
+                       in batch]
         else:
             prompts = [self._build_prompt(sample.proof_state) for sample in batch]
         tactics = [self.tokenizer.encode(sample.tactic) for sample in batch]
@@ -274,7 +278,10 @@ class Policy:
         state_dict = self.model.state_dict()
         result = {"state_dict": state_dict, "eos_id": self.eos_token, "proof_step_id": self.proof_step_id,
                   "proof_state_id": self.proof_state_id, "tactics_id": self.tactics_id,
-                  "tactics_sep_id": self.tactics_sep_id}
+                  "tactics_sep_id": self.tactics_sep_id, "proofstate_sep_id": self.proofstate_sep_id,
+                  "successful_proof_token": self.successful_proof_token,
+                  "incomplete_proof_token": self.incomplete_proof_token,
+                  "invalid_proof_token": self.invalid_proof_token}
         torch.save(result, path)
 
     def load(self, path: str | Path):
@@ -285,7 +292,6 @@ class Policy:
         self.tactics_id = result["tactics_id"]
         self.tactics_sep_id = result["tactics_sep_id"]
         self.proofstate_sep_id = result["proofstate_sep_id"]
-        self.goals_sep_id = result["goals_sep_id"]
         self.successful_proof_token = result["successful_proof_token"]
         self.incomplete_proof_token = result["incomplete_proof_token"]
         self.invalid_proof_token = result["invalid_proof_token"]
@@ -300,21 +306,19 @@ class Policy:
         model.to(device)
         model.eval()
         return cls(model, result["eos_id"], result["proof_step_id"], result["proof_state_id"], result["tactics_id"],
-                   result["tactics_sep_id"], result["proofstate_sep_id"], result["goals_sep_id"],
-                   result["successful_proof_token"], result["incomplete_proof_token"], result["invalid_proof_token"],
-                   tokenizer, device)
+                   result["tactics_sep_id"], result["proofstate_sep_id"], result["successful_proof_token"],
+                   result["incomplete_proof_token"], result["invalid_proof_token"], tokenizer, device)
 
 
 class MambaPolicy(Policy):
 
     def __init__(self, model: nn.Module, mamba_config: MambaConfig,
                  eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
-                 tactics_sep_id: int, proofstate_sep_id: int, goals_sep_id: int, successful_proof_token: int,
+                 tactics_sep_id: int, proofstate_sep_id: int, successful_proof_token: int,
                  incomplete_proof_token: int, invalid_proof_token: int,
                  tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
                  device: str = "cpu"):
-        super().__init__(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, goals_sep_id,
-                         proofstate_sep_id,
+        super().__init__(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, proofstate_sep_id,
                          successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
         self.config = mamba_config
 
@@ -328,8 +332,7 @@ class MambaPolicy(Policy):
         state_dict = self.model.state_dict()
         result = {"state_dict": state_dict, "eos_id": self.eos_token, "proof_step_id": self.proof_step_id,
                   "proof_state_id": self.proof_state_id, "tactics_id": self.tactics_id,
-                  "tactics_sep_id": self.tactics_sep_id,
-                  "proofstate_sep_id": self.proofstate_sep_id, "goals_sep_id": self.goals_sep_id,
+                  "tactics_sep_id": self.tactics_sep_id, "proofstate_sep_id": self.proofstate_sep_id,
                   "successful_proof_token": self.successful_proof_token,
                   "incomplete_proof_token": self.incomplete_proof_token,
                   "invalid_proof_token": self.invalid_proof_token, "config": asdict(self.config)}
@@ -337,11 +340,11 @@ class MambaPolicy(Policy):
 
     @classmethod
     def from_file(cls, path: str | Path, mamba_config: MambaConfig, eos_id: int, proof_step_id: int,
-                  proof_state_id: int, tactics_id: int, tactics_sep_id: int, proofstate_sep_id: int, goals_sep_id: int,
+                  proof_state_id: int, tactics_id: int, tactics_sep_id: int, proofstate_sep_id: int,
                   successful_proof_token: int, incomplete_proof_token: int, invalid_proof_token: int,
                   is_gflownet: bool, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
         model = MambaLMHeadModelWrapper(mamba_config, device=device, is_gflownet=is_gflownet)
         model.load_state_dict(torch.load(path, map_location=device))
         return cls(model, mamba_config, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id,
-                   proofstate_sep_id,
-                   goals_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
+                   proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer,
+                   device)

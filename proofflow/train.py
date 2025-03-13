@@ -156,13 +156,12 @@ def main():
     tactics_id = tokenizer.added_tokens_encoder["[TACTICS]"]
     tactics_sep_id = tokenizer.added_tokens_encoder["[SEP]"]
     proofstate_sep_id = tokenizer.added_tokens_encoder["[STATESEP]"]
-    goals_sep_id = tokenizer.added_tokens_encoder["[GOALSEP]"]
     successful_proof_token = tokenizer.added_tokens_encoder["[SUC]"]
     incomplete_proof_token = tokenizer.added_tokens_encoder["[INC]"]
     invalid_proof_token = tokenizer.added_tokens_encoder["[INV]"]
     tokenizer.pad_token = "[PAD]"
     policy = MambaPolicy(model, config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
-                         proofstate_sep_id, goals_sep_id, successful_proof_token, incomplete_proof_token,
+                         proofstate_sep_id, successful_proof_token, incomplete_proof_token,
                          invalid_proof_token, tokenizer, device)
 
     gradient_accumulation_steps = args.gradient_accumulation_steps

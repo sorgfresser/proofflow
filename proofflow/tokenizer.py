@@ -13,7 +13,7 @@ if __name__ == '__main__':
     vocab_size = 50_257
     trainer = BpeTrainer(vocab_size=vocab_size,
                          special_tokens=["[UNK]", "[PAD]", "[EOS]", "[PROOFSTATE]", "[PROOFSTEP]", "[TACTICS]",
-                                         "[SEP]", "[STATESEP]", "[GOALSEP]", "[SUC]", "[INC]", "[INV]"])
+                                         "[SEP]", "[STATESEP]", "[SUC]", "[INC]", "[INV]"])
 
     # We split on whitespaces or periods, as periods are used frequently in imports
     # For example, we do not want multiple namespaces in one token

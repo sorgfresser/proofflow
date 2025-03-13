@@ -27,8 +27,6 @@ tactics_sep_id = tokenizer.added_tokens_encoder["[SEP]"]
 tokenizer.pad_token = "[PAD]"
 proofstate_sep_id = tokenizer.added_tokens_encoder[
     "[STATESEP]"]  # the policy sees a the list of proofstates we have transitioned to, separated by this token
-goals_sep_id = tokenizer.added_tokens_encoder[
-    "[GOALSEP]"]  # the current proof states is a list of goals separated by this token (maybe not necessary)
 
 # we need to be able to transition to unique leaf states, so end trajectories with the following tokens
 successful_proof_token = tokenizer.added_tokens_encoder["[SUC]"]
@@ -42,7 +40,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 policy = MambaPolicy.from_file("../model_small.pt", config, eos_id, proofstep_id, proofstate_id, tactics_id,
                                tactics_sep_id,
-                               proofstate_sep_id, goals_sep_id, successful_proof_token, incomplete_proof_token,
+                               proofstate_sep_id, successful_proof_token, incomplete_proof_token,
                                invalid_proof_token, False, tokenizer, device)
 
 print(policy.next_tactics(response.goals[0], k=10))

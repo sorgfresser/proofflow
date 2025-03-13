@@ -280,7 +280,7 @@ def train_gflownet(
                     assert isinstance(response, LeanREPLNextProofState)
                     goals = response.goals
                     action_trajectories[i] = actions[j]
-                    proof_state_history[i] = policy.tokenizer.decode([policy.goals_sep_id]).join(goals)
+                    proof_state_history[i] = "\n".join(goals)
 
                     if not goals:
                         log_rewards[i] = log(10)  # proof complete
@@ -434,7 +434,6 @@ def main():
     tactics_id = tokenizer.added_tokens_encoder["[TACTICS]"]
     tactics_sep_id = tokenizer.added_tokens_encoder["[SEP]"]
     proofstate_sep_id = tokenizer.added_tokens_encoder["[STATESEP]"]  # the policy sees a the list of proofstates we have transitioned to, separated by this token
-    goals_sep_id = tokenizer.added_tokens_encoder["[GOALSEP]"]  # the current proof states is a list of goals separated by this token (maybe not necessary)
 
     # we need to be able to transition to unique leaf states, so end trajectories with the following tokens
     successful_proof_token = tokenizer.added_tokens_encoder["[SUC]"]
@@ -445,7 +444,7 @@ def main():
 
     # TODO: we should pretrain with the same state formulation as the GFlowNet implementation
     policy = MambaPolicy.from_file("../model_small.pt", config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, proofstate_sep_id,
-                                   goals_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
+                                   successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
 
     gradient_accumulation_steps = args.gradient_accumulation_steps
     batch_size = args.batch_size
