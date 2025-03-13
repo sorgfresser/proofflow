@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from math import log
 from collections import defaultdict
 from typing import Tuple, List
@@ -149,6 +150,9 @@ def get_start_theorems(path):
         # Dataset errors, i.e. no tactics were traced
         if not thm.traced_tactics:
             continue
+        # Another dataset error, they also globbed the lake files, i.e. mathlib's dependencies
+        if ".lake" in thm.file_path:
+            continue
         yield thm
 
 
@@ -156,7 +160,7 @@ def train_gflownet(
         policy: Policy,
         start_theorems: List[Theorem],
         precomputed_trajectories: List[Tuple[List[List[int]], List[List[int]]]],  # these are the human-written trajectories
-        handler: LeanREPLHandler,
+        handler_factory: Callable[[], LeanREPLHandler],
         repo_path: Path,
         optimizer: optim.Optimizer,
         z_optimizer: optim.Optimizer,
@@ -179,7 +183,9 @@ def train_gflownet(
     tb_loss_agg = back_loss_agg = 0
 
     for r in range(rounds):
-
+        # Reset the handler to avoid memory leaks
+        handler = handler_factory()
+        # Pretty sure that this is not compatible with gradient accumulation, because we discard the gradients here
         with torch.no_grad():
 
             # 0. add new trajectories to the replay buffer
@@ -406,7 +412,7 @@ def main():
     args = parser.parse_args()
 
 
-    handler = LeanREPLHandler(Path("../leanproject"))
+    handler_factory = lambda: LeanREPLHandler(Path("../leanproject"))
     start_theorems = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
 
     tokenizer = PreTrainedTokenizerFast(tokenizer_file="lean_tokenizer.json")
@@ -451,7 +457,7 @@ def main():
     # TODO: add lr scheduler?
     precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
 
-    train_gflownet(policy, start_theorems, precomputed_trajectories, handler, Path("../mathlib4"), optimizer, z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device)
+    train_gflownet(policy, start_theorems, precomputed_trajectories, handler_factory, Path("../mathlib4"), optimizer, z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device)
 
 if __name__ == '__main__':
     main()

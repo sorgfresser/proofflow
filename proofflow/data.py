@@ -134,6 +134,9 @@ def replace_proof(theorem: str) -> str:
         # Fallback to without space
         if idx == -1:
             idx = _find_rightmost_not_in_parenthesis(theorem, ":=")
+        # For pattern matching
+        if idx == -1:
+            idx = _find_leftmost_not_in_parenthesis(theorem, "|")
         assert idx != -1
         return theorem[:idx] + " := by sorry"
 
@@ -196,9 +199,9 @@ class Theorem(BaseModel):
             raise RuntimeError("Error in manifesting theorem")
         for tactic in tactics:
             if tactic["pos"]["line"] >= self.start.line:
-                compare_self = tactic["tactic"].strip().replace("\n", " ")
+                compare_self = tactic["goals"].strip().replace("\n", " ")
                 compare_self = re.sub(WS, "", compare_self)
-                compare_other = self.traced_tactics[0].tactic.strip().replace("\n", " ")
+                compare_other = self.traced_tactics[0].state_before.strip().replace("\n", " ")
                 compare_other = re.sub(WS, "", compare_other)
                 assert compare_self == compare_other
 
