@@ -131,19 +131,35 @@ class Policy:
             return self.tokenizer.decode(result_ids[0])
         return self.tokenizer.batch_decode(result_ids)
 
-    def next_tactics(self, proof_state: str, k: int, tactics_so_far: Optional[List[str]] = None,
-                     temperature: float = 0.0, max_new_tokens: int = 20) -> List[str]:
-        """Predict the subsequent tactics for the given proof state (which might have multiple goals)
+    def next_tactics(self, proof_states: Union[List[str], str], k: int, tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
+                     previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
+                     temperature: float = 0.0, max_new_tokens: int = 20) -> Union[List[List[str]], List[str]]:
+        """Predict the subsequent tactics for the given proof states (which might have multiple goals)
 
-        :param proof_state: The proof state used to predict the tactics for.
+        :param proof_states: The proof states used to predict the tactics for.
         :param k: The number of tactics to predict
         :param tactics_so_far: Optional list of tactics so far
+        :param previous_proof_states: Optional list of previous proof states
         :param temperature: The temperature to use, 0 for greedy sampling
         :param max_new_tokens: The maximum number of new tokens to generate for the tactics
         :return: The subsequent tactics
         """
-        prompt = self._build_prompt(proof_state, tactics_so_far)
-        prompt_tensor = torch.tensor(prompt).to(self.device).repeat(k, 1)
+        output_single = False
+        if isinstance(proof_states, str):
+            output_single = True
+            proof_states = [proof_states]
+            assert not tactics_so_far or isinstance(tactics_so_far[0], str)
+            tactics_so_far = [tactics_so_far] if tactics_so_far is not None else None
+            assert not previous_proof_states or isinstance(previous_proof_states[0], str)
+            previous_proof_states = [previous_proof_states] if previous_proof_states is not None else None
+
+
+        prompts = [self._build_prompt(proof_state, tactics_so_far, previous_proof_states) for proof_state in
+                     proof_states]
+        prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_attention_mask=True,
+                                            return_tensors="pt")
+        # Will repeat the prompt k times for each proof state one by one
+        prompt_tensor = prompt_results.input_ids.to(self.device)[None].repeat(k, 1, 1).transpose(0, 1).reshape(-1, prompt_results.input_ids.shape[1])
         tokens = None
         tactics = []
         idx = 0
