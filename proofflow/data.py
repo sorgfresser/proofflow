@@ -241,30 +241,6 @@ class Theorem(BaseModel):
             text_wo = text_wo.replace("lemma ", "theorem ", 1)
         assert text_wo.startswith("theorem")
         text_wo = replace_proof(text_wo)
-
-        text_before = "\n".join(lines[:self.start.line - 1] + [lines[self.start.line - 1][:self.start.column - 1]])
-        text_before_wo = text_without_comments(text_before)
-        # Remove imports
-        # line_idx = 0
-        # for line_idx, line in enumerate(text_before_wo.split("\n")):
-        #     if not line.strip().startswith("import"):
-        #         break
-        # text_before_wo = "\n".join(text_before_wo.split("\n")[line_idx:])
-
-        # imports = self.imports(repo_path)
-        handler = LeanREPLHandler(Path("../leanproject"))
-        # handler.env = None
-        # handler.send_command("\n".join(imports))
-        # response, env = handler.receive_json()
-        # handler.env = env
-        handler.send_command(text_before_wo)
-        response, env = handler.receive_json()
-        handler.env = env
-        handler.send_command(text_wo)
-        response, env = handler.receive_json()
-        assert len(response["sorries"]) == 1
-        assert not any(msg.severity == "error" for msg in response.get("messages", []))
-        assert isinstance(response["sorries"][0], LeanREPLProofState) # asserts it worked
         return text_wo
 
     def imports(self, repo_path: Path) -> list[str]:
