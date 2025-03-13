@@ -14,6 +14,9 @@ WS = r"\s+"
 MAX_WS = r"^\s*"
 
 
+class UnknownMetaVariableError(RuntimeError):
+    pass
+
 class TrainingSample(BaseModel):
     proof_state: str
     tactic: str
@@ -184,6 +187,9 @@ class Theorem(BaseModel):
         full_path = repo_path / self.file_path
         handler.send_file(full_path, all_tactics=True)
         response, _ = handler.receive_json()
+        # Known bug in Lean REPL
+        if response.get("message") == "unknown metavariable '?[anonymous]'":
+            raise UnknownMetaVariableError("Unknown metavariable '?[anonymous]'")
         tactics = response["tactics"]
         contains_error = any(msg.severity == "error" for msg in response.get("messages", []))
         if contains_error:
