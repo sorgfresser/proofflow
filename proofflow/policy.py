@@ -76,12 +76,13 @@ class Policy:
         self.device = device
 
     def next_tactic(self, proof_state: str, tactics_so_far: Optional[List[str]] = None,
-                    temperature: float = 0.0) -> str:
+                    temperature: float = 0.0, max_new_tokens: int = 20) -> str:
         """Predict the subsequent tactic for the given proof state (which might have multiple goals)
 
         :param proof_state: The proof state used to predict the tactic for.
         :param tactics_so_far: Optional list of tactics so far
         :param temperature: The temperature to use, 0 for greedy sampling
+        :param max_new_tokens: The maximum number of new tokens to generate for the tactic
         :return: The subsequent tactic
         """
         prompt = self._build_prompt(proof_state, tactics_so_far)
@@ -89,7 +90,7 @@ class Policy:
         token = None
         tactic = []
         idx = 0
-        while token != self.eos_token and idx < MAX_OUTPUT_LEN:
+        while token != self.eos_token and idx < max_new_tokens:
             logits = self.model(prompt_tensor)[:, -1,
                      ...]  # we only use the final one, the rest is previous tokens only used in training
             if temperature > 0.0:
@@ -104,13 +105,14 @@ class Policy:
         return self.tokenizer.decode(tactic)
 
     def next_tactics(self, proof_state: str, k: int, tactics_so_far: Optional[List[str]] = None,
-                     temperature: float = 0.0) -> List[str]:
+                     temperature: float = 0.0, max_new_tokens: int = 20) -> List[str]:
         """Predict the subsequent tactics for the given proof state (which might have multiple goals)
 
         :param proof_state: The proof state used to predict the tactics for.
         :param k: The number of tactics to predict
         :param tactics_so_far: Optional list of tactics so far
         :param temperature: The temperature to use, 0 for greedy sampling
+        :param max_new_tokens: The maximum number of new tokens to generate for the tactics
         :return: The subsequent tactics
         """
         prompt = self._build_prompt(proof_state, tactics_so_far)
@@ -118,7 +120,7 @@ class Policy:
         tokens = None
         tactics = []
         idx = 0
-        while tokens is None or (tokens != self.eos_token).any() and idx < MAX_OUTPUT_LEN:
+        while tokens is None or (tokens != self.eos_token).any() and idx < max_new_tokens:
             logits = self.model(prompt_tensor)[:, -1, ...]
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
