@@ -330,9 +330,9 @@ def _compute_rewards(proven: List[bool], invalid: List[bool], times: List[float]
         if i:
             rewards.append(log(0.01))
         elif p:
-            rewards.append(log(10) + log(1 - exp(-t / 5)))
+            rewards.append(log(10) - t / 5)  # proof complete
         else:
-            rewards.append(log(0.1) + log(1 - exp(-t / 5))) # ongoing = small reward
+            rewards.append(log(0.1)  - t / 5) # ongoing = small reward
     return rewards
 
 
