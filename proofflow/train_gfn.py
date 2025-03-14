@@ -424,6 +424,15 @@ def train_gflownet(
                     print(f"Error in MCTS: {e}")
                     print(f"Node: {node.root.proof_state}")
                     print(f"Proof: {node.proof}")
+                    print(f"Current: {currents[current_idx].proof_state}")
+                    print(f"Current previous states: {currents[current_idx].previous_states}")
+                    print(f"Current tactic strings: {tactic_strings[current_idx]}")
+                    strings = []
+                    node = currents[current_idx]
+                    while node.parent is not None:
+                        strings.append(node.parent_tactic)
+                        node = node.parent
+                    print(f"Current proof: {' '.join(reversed(strings))}")
                     raise e
                 # Actual MCTS move after trying a few nodes
                 for node in start_states:
