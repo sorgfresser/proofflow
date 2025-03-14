@@ -559,8 +559,8 @@ def train_gflownet(
             bck_log = torch.log_softmax(bck_outputs, dim=-1)
             for idx in range(len(fwd_log)):
                 for i in range(len(actions[idx])):
-                    log_p_f[idx] += fwd_log[idx, len(prev_states[idx]) + i, actions[idx][i][-1]]
-                    log_p_b[idx] += bck_log[idx, len(next_states[idx]) + i, actions[idx][i][-1]]
+                    log_p_f[idx] += fwd_log[idx, len(prev_states[idx]) + i, actions[idx][i]]
+                    log_p_b[idx] += bck_log[idx, len(next_states[idx]) + i, actions[idx][i]]
 
         # for states, actions in trajs:
         #     for prev_state, action, next_state in zip(states[:-1], actions, states[1:]):
