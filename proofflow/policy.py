@@ -174,8 +174,7 @@ class Policy:
         prompts = [self._build_prompt(proof_state, preceding_tactics, preceding_states)
                     for proof_state, preceding_tactics, preceding_states in
                     zip(proof_states, tactics_so_far, previous_proof_states)]
-        prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_attention_mask=True,
-                                            return_tensors="pt")
+        prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_tensors="pt")
         # Will repeat the prompt k times for each proof state one by one
         prompt_tensor = prompt_results.input_ids.to(self.device)[None].repeat(k, 1, 1).transpose(0, 1).reshape(-1,
                                                                                                                prompt_results.input_ids.shape[
