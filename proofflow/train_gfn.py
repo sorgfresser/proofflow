@@ -400,6 +400,7 @@ def train_gflownet(
                             if node.done:
                                 continue
                             proven, invalid, indices, goals, times_current = _env_expand(handler, tactic_strings[current_idx], [currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx]))
+                            print(proven, invalid, indices, goals, times_current)
                             rewards = _compute_rewards(proven, invalid, times_current)
 
                             # Only passes on valid tactics to expand, we might want to change this
@@ -421,7 +422,6 @@ def train_gflownet(
                 except Exception as e:
                     print(f"Error in MCTS: {e}")
                     print(f"Node: {node.root.proof_state}")
-                    print(f"Start theorems: {start_theorems}")
                     print(f"Proof: {node.proof}")
                     raise e
                 # Actual MCTS move after trying a few nodes
