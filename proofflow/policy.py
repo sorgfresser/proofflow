@@ -1,5 +1,5 @@
 from torch import nn
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Tuple
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, BatchEncoding
 import torch
 from proofflow.data import TrainingSample
@@ -7,6 +7,7 @@ from pathlib import Path
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm import MambaLMHeadModel
 from dataclasses import asdict
+import warnings
 
 
 class MambaLMHeadModelWrapper(MambaLMHeadModel):
@@ -86,6 +87,8 @@ class Policy:
                     previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
                     temperature: float = 0.0, max_new_tokens: int = 20) -> Union[List[str], str]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
+        This is a wrapper around next_tactic_int, which also returns tokenization and prompts to avoid
+        recomputing these when training the GFlowNet.
 
         :param proof_states: The proof states used to predict the tactics for.
         :param tactics_so_far: Optional list of tactics so far
@@ -93,6 +96,23 @@ class Policy:
         :param temperature: The temperature to use, 0 for greedy sampling
         :param max_new_tokens: The maximum number of new tokens to generate for the tactics
         :return: The subsequent tactics
+        """
+        return self.next_tactic_int(proof_states, tactics_so_far, previous_proof_states, temperature, max_new_tokens)[0]
+
+    def next_tactic_int(self, proof_states: Union[List[str], str],
+                        tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
+                        previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
+                        temperature: float = 0.0, max_new_tokens: int = 20) -> \
+                            Tuple[Union[List[str], str], Union[List[List[int]], List[int]], Union[List[str], str]]:
+        """Predict the subsequent tactics for the given proof states (which might have multiple goals)
+        Additionally, return the tokenization and prompts generated.
+
+        :param proof_states: The proof states used to predict the tactics for.
+        :param tactics_so_far: Optional list of tactics so far
+        :param previous_proof_states: Optional list of previous proof states
+        :param temperature: The temperature to use, 0 for greedy sampling
+        :param max_new_tokens: The maximum number of new tokens to generate for the tactics
+        :return: The subsequent tactics, the tokenization of the tactics, the generated prompts
         """
         output_single = False
         if isinstance(proof_states, str):
@@ -102,28 +122,39 @@ class Policy:
             tactics_so_far = [tactics_so_far] if tactics_so_far is not None else None
             assert not previous_proof_states or isinstance(previous_proof_states[0], str)
             previous_proof_states = [previous_proof_states] if previous_proof_states is not None else None
-        prompts = [self._build_prompt(proof_state, tactics_so_far, previous_proof_states) for proof_state in
-                   proof_states]
-        prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_attention_mask=True,
-                                            return_tensors="pt")
+
+        if not tactics_so_far:
+            tactics_so_far = [None] * len(proof_states)
+        if not previous_proof_states:
+            previous_proof_states = [None] * len(proof_states)
+
+        assert len(proof_states) == len(tactics_so_far) == len(previous_proof_states)
+
+        prompts = [self._build_prompt(proof_state, preceding_tactics, preceding_states)
+                    for proof_state, preceding_tactics, preceding_states in
+                    zip(proof_states, tactics_so_far, previous_proof_states)]
+        prompt_lens = torch.tensor([len(p) for p in prompts])
+        prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_tensors="pt")
         prompt_tensor = prompt_results.input_ids.to(self.device)
-        tokens = None
         tactics = []
         idx = 0
-        while tokens is None or (tokens != self.eos_token).any() and idx < max_new_tokens:
-            logits = self.model(prompt_tensor)[:, -1, ...]
+        eos = torch.tensor([False] * len(prompts))
+        while not all(eos) and idx < max_new_tokens:
+            with torch.autocast(device_type=self.device, dtype=torch.float16):
+                logits = self.model(prompt_tensor)[:, prompt_lens-1, ...]
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
                 tokens = torch.multinomial(softmaxed, 1).squeeze(1)
             else:
                 tokens = logits.argmax(dim=1)
+            eos |= tokens == self.eos_token
             prompt_tensor = torch.cat([prompt_tensor, tokens[:, None]], dim=1)
             tactics.append(tokens)
             idx += 1
         tactics = torch.stack(tactics, dim=1)
         tactics = tactics[:, :-1]
         tactics = tactics.tolist()
-        result_ids = []
+        result_ids: List[List[int]] = []
         for tactic in tactics:
             result = []
             for token in tactic:
@@ -132,14 +163,34 @@ class Policy:
                 result.append(token)
             result_ids.append(result)
         if output_single:
-            return self.tokenizer.decode(result_ids[0])
-        return self.tokenizer.batch_decode(result_ids)
+            return self.tokenizer.decode(result_ids[0]), result_ids[0], prompts[0]
+        return self.tokenizer.batch_decode(result_ids), result_ids, prompts
 
     def next_tactics(self, proof_states: Union[List[str], str], k: int,
                      tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                      previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
                      temperature: float = 0.0, max_new_tokens: int = 20) -> Union[List[List[str]], List[str]]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
+        This is a wrapper around next_tactics_int, which also returns tokenization and prompts to avoid
+        recomputing these when training the GFlowNet.
+
+        :param proof_states: The proof states used to predict the tactics for.
+        :param k: The number of tactics to predict
+        :param tactics_so_far: Optional list of tactics so far
+        :param previous_proof_states: Optional list of previous proof states
+        :param temperature: The temperature to use, 0 for greedy sampling
+        :param max_new_tokens: The maximum number of new tokens to generate for the tactics
+        :return: The subsequent tactics
+        """
+        return self.next_tactics_int(proof_states, k, tactics_so_far, previous_proof_states, temperature, max_new_tokens)[0]
+
+    def next_tactics_int(self, proof_states: Union[List[str], str], k: int,
+                     tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
+                     previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
+                     temperature: float = 0.0, max_new_tokens: int = 20) -> \
+                            Tuple[Union[List[List[str]], List[str]], Union[List[List[List[int]]], List[List[int]]], Union[List[str], str]]:
+        """Predict the subsequent tactics for the given proof states (which might have multiple goals)
+        Additionally, return the tokenization and prompts generated.
 
         :param proof_states: The proof states used to predict the tactics for.
         :param k: The number of tactics to predict
@@ -158,24 +209,36 @@ class Policy:
             assert not previous_proof_states or isinstance(previous_proof_states[0], str)
             previous_proof_states = [previous_proof_states] if previous_proof_states is not None else None
 
-        prompts = [self._build_prompt(proof_state, tactics_so_far, previous_proof_states) for proof_state in
-                   proof_states]
+        if not tactics_so_far:
+            tactics_so_far = [None] * len(proof_states)
+        if not previous_proof_states:
+            previous_proof_states = [None] * len(proof_states)
+
+        assert len(proof_states) == len(tactics_so_far) == len(previous_proof_states)
+
+        prompts = [self._build_prompt(proof_state, preceding_tactics, preceding_states)
+                    for proof_state, preceding_tactics, preceding_states in
+                    zip(proof_states, tactics_so_far, previous_proof_states)]
+        prompt_lens = torch.tensor([len(p) for p in prompts])
         prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_attention_mask=True,
                                             return_tensors="pt")
         # Will repeat the prompt k times for each proof state one by one
         prompt_tensor = prompt_results.input_ids.to(self.device)[None].repeat(k, 1, 1).transpose(0, 1).reshape(-1,
                                                                                                                prompt_results.input_ids.shape[
                                                                                                                    1])
-        tokens = None
         tactics = []
         idx = 0
-        while tokens is None or (tokens != self.eos_token).any() and idx < max_new_tokens:
-            logits = self.model(prompt_tensor)[:, -1, ...]
+        eos = torch.tensor([False] * len(prompts))
+        while not all(eos) and idx < max_new_tokens:
+            with torch.autocast(device_type=self.device, dtype=torch.float16):
+                logits = self.model(prompt_tensor)[:, prompt_lens-1, ...]
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
                 tokens = torch.multinomial(softmaxed, 1).squeeze(1)
-            else:
+            else:  # if we take argmax, presumably we may as well just call next_tactic
+                warnings.warn("Taking argmax in next_tactics_int, this is equivalent to calling next_tactic")
                 tokens = logits.argmax(dim=1)
+            eos |= tokens == self.eos_token
             prompt_tensor = torch.cat([prompt_tensor, tokens[:, None]], dim=1)
             tactics.append(tokens)
             idx += 1
@@ -192,11 +255,11 @@ class Policy:
                 result.append(token)
             result_ids[idx % len(proof_states)].append(result)
         if output_single:
-            return self.tokenizer.batch_decode(result_ids[0])
-        return [self.tokenizer.batch_decode(result) for result in result_ids]
+            return self.tokenizer.batch_decode(result_ids[0]), result_ids[0], prompts[0]
+        return [self.tokenizer.batch_decode(result) for result in result_ids], result_ids, prompts
 
     def _build_prompt(self, proof_state: str, tactics_so_far: Optional[List[str]] = None,
-                      proof_states_so_far: Optional[List[str]] = None) -> List[int]:
+                      proof_states_so_far: Optional[List[str]] = None, state_skip: int = 2) -> List[int]:
         state_ids: List[int] = self.tokenizer.encode(proof_state)
         to_append = []
         if tactics_so_far is not None:
@@ -207,6 +270,7 @@ class Policy:
             tactics_flat: List[int] = sum(tactics, [])
             to_append = [self.tactics_id] + tactics_flat
         if proof_states_so_far is not None:
+            proof_states_so_far = proof_states_so_far[len(proof_states_so_far) % state_skip :: state_skip]
             proof_states: List[List[int]] = [self.tokenizer.encode(proof_state) + [self.proofstate_sep_id] for
                                              proof_state in proof_states_so_far]
             proof_states_flat: List[int] = sum(proof_states, [])

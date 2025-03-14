@@ -1,14 +1,16 @@
 from collections.abc import Callable
-from math import log
+from math import exp, log
+import time
 from collections import defaultdict
-from typing import Tuple, List
+from typing import Tuple, List, Union
 
 from torch import nn
 import torch
 from torch_scatter import scatter
 from lean_repl_py import LeanREPLHandler, LeanREPLNextProofState
 from proofflow.model.ffm import FFM
-from proofflow.data import parse_json, LEAN_DOJO_PATH, TheoremDataset, TrainSampleDataset, TrainingSample, Theorem, UnknownMetaVariableError
+from proofflow.data import parse_json, LEAN_DOJO_PATH, TheoremDataset, TrainSampleDataset, TrainingSample, Theorem, \
+    UnknownMetaVariableError
 from pathlib import Path
 from torch.utils.data import DataLoader
 from proofflow.policy import Policy, MambaLMHeadModelWrapper, MambaPolicy
@@ -18,7 +20,6 @@ import wandb
 from mamba_ssm.models.config_mamba import MambaConfig
 from tqdm import tqdm
 from argparse import ArgumentParser
-
 
 MAX_TRAJ_LEN = 10
 MAX_OUTPUT_LEN = 20
@@ -58,7 +59,7 @@ class Model(nn.Module):
         # self.block1 = ModelBlock(20, 20, 64, 3, 3, 0.1)
         # self.block2 = ModelBlock(20, 20, 64, 3, 3, 0.1)
         self.block3 = ModelBlock(20, vocab_size, 64, 3, 3, 0.1)
-        self.z_head = (nn.Linear(20, 1, bias=True), ) # hack to not register as parameter
+        self.z_head = (nn.Linear(20, 1, bias=True),)  # hack to not register as parameter
         self.back_head = nn.Linear(20, vocab_size, bias=False)
 
     def backbone(self, x):
@@ -140,9 +141,11 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
     metrics = {f"validation/{key}": value for key, value in metrics.items()}
     wandb.log(metrics)
 
+
 def huber_loss(x, beta=1, i_delta=4):
     ax = torch.abs(x)
     return torch.where(ax <= beta, 0.5 * x * x, beta * (ax - beta / 2)) * i_delta
+
 
 # retrieve the initial theorems
 def get_start_theorems(path):
@@ -159,7 +162,8 @@ def get_start_theorems(path):
 def train_gflownet(
         policy: Policy,
         start_theorems: List[Theorem],
-        precomputed_trajectories: List[Tuple[List[List[int]], List[List[int]]]],  # these are the human-written trajectories
+        precomputed_trajectories: List[Tuple[List[List[int]], List[List[int]]]],
+        # these are the human-written trajectories
         handler_factory: Callable[[], LeanREPLHandler],
         repo_path: Path,
         optimizer: optim.Optimizer,
@@ -169,8 +173,9 @@ def train_gflownet(
         batch_size_sampled: int,
         rounds: int,
         device: str,
-        replay_buffer_len: int = 1_000
-    ):
+        replay_buffer_len: int = 1_000,
+        max_retries: int = 5
+):
     assert precomputed_trajectories
     policy.model.train()
 
@@ -182,7 +187,7 @@ def train_gflownet(
 
     tb_loss_agg = back_loss_agg = 0
 
-    for r in range(rounds):
+    for r in tqdm(range(rounds)):
         # Reset the handler to avoid memory leaks
         handler = handler_factory()
 
@@ -204,72 +209,49 @@ def train_gflownet(
                     start_states.append(proof_state.goal)
 
             action_trajectories = [[] for __ in start_states]  # list of actions for each proof
-            state_trajectories = [[] for i in start_states]  # list of GFlowNet states for each proof
+            state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
             proof_state_history = [[i] for i in start_states]  # list of proof states for each proof
             done = [False] * len(start_states)
-            log_rewards = [log(0.1)] * len(start_states)  # an inprogress trajectory gets more reward than a failed one
-                                                          # TODO: we should reconsider the reward setup here
+            log_rewards = [log(0.1)] * len(start_states)
+            times = [0] * len(start_states)
 
             idx = 0
             while not all(done) and idx < MAX_TRAJ_LEN:
 
-                #prompts = [
-                #      [policy.proof_state_id] \
-                #    + [
-                #        t for s in state[(len(state)-1) % GET_STATE_EVERY :: GET_STATE_EVERY]
-                #          for t in policy.tokenizer.encode(s) + [policy.proofstate_sep_id]
-                #      ][:-1] \
-                #    + [policy.proof_step_id]
-                #        for state in state_trajectory
-                #]
+                histories, end_states = [], []
 
-                prompts = []
                 for i, traj in enumerate(proof_state_history):
+                    if not done[i]:
+                        histories.append(traj[:-1])
+                        end_states.append(traj[-1])
 
-                    if done[i]:
-                        continue
-
-                    prompt = [policy.tokenizer.encode(s) for s in traj[(len(traj)-1) % GET_STATE_EVERY :: GET_STATE_EVERY]]
-                    prompt = [t for s in prompt for t in s + [policy.proofstate_sep_id]][:-1]
-                    prompt = [policy.proof_state_id] + prompt + [policy.proof_step_id]
-                    prompts.append(prompt)
-
-                    state_trajectories[i].append(prompt)
-
-                padded = policy.tokenizer.pad({"input_ids": prompts}, padding_side="left", return_tensors="pt") # TODO: pad right instead most likely
-                inputs = padded.input_ids.to(device)
-
-                actions = [[] for __ in inputs]
-                eos = [False] * len(inputs)
-
-                output_idx = 0
-                while not all(eos) and output_idx < MAX_OUTPUT_LEN:
-
-                    with torch.autocast(device_type=device, dtype=torch.float16):
-                        logits = policy.model(inputs)[:, -1, ...]  # TODO: wasteful to compute these twice
-                        tokens = logits.argmax(dim=1)
-
-                    for i in range(len(actions)):
-                        if eos[i]:
-                            continue
-                        actions[i].append(tokens[i].item())
-                        eos[i] = tokens[i] == policy.eos_token
-                    output_idx += 1
+                tactic_strings, tactic_codes, prompts = policy.next_tactics_int(end_states, max_retries, None,
+                                                                                histories, temperature=1)
 
                 # compute next states and rewards
 
-                tactic_strings = policy.tokenizer.batch_decode([i[:-1] for i in actions])
-
+                actions: List[Union[List[int], None]] = [None] * len(tactic_codes)
                 j = 0
                 for i, __ in enumerate(start_states):
 
                     if done[i]:
                         continue
 
-                    handler.send_tactic(tactic_strings[j], envs[i].proof_state)
-                    response, _ = handler.receive_json()
-                    has_error = "message" in response and response["message"].startswith("Lean error")
-                    has_error = has_error or "messages" in response and any(m.severity == "error" for m in response["messages"])
+                    state_trajectories[i].append(prompts[i])
+
+                    for tactic_string, action in zip(tactic_strings[j], tactic_codes[j]):
+                        times[i] -= time.perf_counter()
+                        handler.send_tactic(tactic_string, envs[i].proof_state)
+                        response, _ = handler.receive_json()
+                        times[i] += time.perf_counter()
+
+                        has_error = "message" in response and response["message"].startswith("Lean error")
+                        has_error = has_error or "messages" in response and any(
+                            m.severity == "error" for m in response["messages"])
+
+                        actions[j] = action
+                        if not has_error:  # TODO: here we just take the first one without an error. We should try something smarter like tree search
+                            break
 
                     if has_error:
                         log_rewards[i] = log(0.01)  # proof failed
@@ -278,12 +260,16 @@ def train_gflownet(
                         j += 1
                         continue
                     assert isinstance(response, LeanREPLNextProofState)
+                    assert actions[j] is not None
                     goals = response.goals
                     action_trajectories[i] = actions[j]
                     proof_state_history[i] = "\n".join(goals)
 
                     if not goals:
-                        log_rewards[i] = log(10)  # proof complete
+                        proof_length = len(
+                            actions[j])  # TODO: test some different reward formulations (e.g. computation time)
+                        log_rewards[i] = log(10) + log(1 - exp(-proof_length / 5))  # proof complete
+                        log_rewards[i] = log(10) + log(1 - exp(-times[i] / 5))
                         done[i] = True
                         state_trajectories[i].append([policy.successful_proof_token])
                     j += 1
@@ -316,12 +302,15 @@ def train_gflownet(
             for i in idxs_precomputed:
                 trajs.append(precomputed_trajectories[i])
 
+        # TODO: check this isn't always 0
+        print(policy.model.z_head.grad)
+
         # 2. call the model on each trajectory
 
         starting_states = [states[0] for states, __ in trajs]
-        prompts = starting_states
-        padded = policy.tokenizer.pad({"input_ids": prompts}, padding_side="left", return_tensors="pt")
-        log_z_inputs = padded.input_ids.to(device)
+        z_prompts = starting_states
+        z_padded_prompts = policy.tokenizer.pad({"input_ids": z_prompts}, padding_side="left", return_tensors="pt")
+        log_z_inputs = z_padded_prompts.input_ids.to(device)
 
         with torch.autocast(device_type=device, dtype=torch.float16):
             log_z = policy.model.log_z(log_z_inputs)  # some duplicate computation happening here
@@ -341,11 +330,13 @@ def train_gflownet(
                 bck_input = next_state
 
                 for t in action:
-
                     with torch.autocast(device_type=device, dtype=torch.float16):
                         # these are the forward and backward probability estimates for each token
-                        log_p_f[idx] += policy.softmax(policy.model(torch.tensor([fwd_input]).to(device))[0, -1] / TEMPERATURE)[t].log()
-                        log_p_b[idx] += policy.softmax(policy.model.p_b(torch.tensor([bck_input]).to(device))[0, -1] / TEMPERATURE)[t].log()
+                        log_p_f[idx] += \
+                        policy.softmax(policy.model(torch.tensor([fwd_input]).to(device))[0, -1] / TEMPERATURE)[t].log()
+                        log_p_b[idx] += \
+                        policy.softmax(policy.model.p_b(torch.tensor([bck_input]).to(device))[0, -1] / TEMPERATURE)[
+                            t].log()
 
                     fwd_input += t
                     bck_input += t
@@ -375,7 +366,6 @@ def train_gflownet(
         loss.backward()
 
         if (r + 1) % gradient_accumulation_steps == 0:
-
             nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
 
             optimizer.step()
@@ -384,6 +374,7 @@ def train_gflownet(
             z_optimizer.zero_grad()
 
             # TODO: replace this with the original logging code again
+            # TODO: log mean reward and proof similarity on a set of start states
             print(tb_loss_agg, back_loss_agg)
 
 def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTrainedTokenizerFast) -> List[Tuple[List[List[int]], List[List[int]]]]:
@@ -402,7 +393,6 @@ def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTr
 
 
 def main():
-
     torch.set_float32_matmul_precision('high')
 
     parser = ArgumentParser()
@@ -415,7 +405,6 @@ def main():
     parser.add_argument("--reload-checkpoint", action="store_true", default=False)
     args = parser.parse_args()
 
-
     handler_factory = lambda: LeanREPLHandler(Path("../leanproject"))
     start_theorems = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
 
@@ -425,19 +414,14 @@ def main():
 
     n_layers = args.n_layers
     d_model = args.d_model
-    config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
-    model = MambaLMHeadModelWrapper(config)
-    model = torch.compile(model)
-    torch.backends.cudnn.benchmark = True
-    model.train()
-    model.to(device)
 
     eos_id = tokenizer.added_tokens_encoder["[EOS]"]
     proofstate_id = tokenizer.added_tokens_encoder["[PROOFSTATE]"]
     proofstep_id = tokenizer.added_tokens_encoder["[PROOFSTEP]"]
     tactics_id = tokenizer.added_tokens_encoder["[TACTICS]"]
     tactics_sep_id = tokenizer.added_tokens_encoder["[SEP]"]
-    proofstate_sep_id = tokenizer.added_tokens_encoder["[STATESEP]"]  # the policy sees a the list of proofstates we have transitioned to, separated by this token
+    # the policy sees a the list of proofstates we have transitioned to, separated by this token
+    proofstate_sep_id = tokenizer.added_tokens_encoder["[STATESEP]"]
 
     # we need to be able to transition to unique leaf states, so end trajectories with the following tokens
     successful_proof_token = tokenizer.added_tokens_encoder["[SUC]"]
@@ -454,10 +438,12 @@ def main():
     else:
         config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
         model = MambaLMHeadModelWrapper(config, device=device, is_gflownet=True)
-        policy = MambaPolicy(model, config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
+        policy = MambaPolicy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
                              proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token,
-                             tokenizer, device)
+                             tokenizer, device, mamba_config=config)
     policy.model.train()
+    policy.model = torch.compile(policy.model)
+    torch.backends.cudnn.benchmark = True
 
     # policy = Policy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, proofstate_sep_id,
     #                 successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
@@ -472,7 +458,9 @@ def main():
     # TODO: add lr scheduler?
     precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
 
-    train_gflownet(policy, start_theorems, precomputed_trajectories, handler_factory, Path("../mathlib4"), optimizer, z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device)
+    train_gflownet(policy, start_theorems, precomputed_trajectories, handler_factory, Path("../mathlib4"), optimizer,
+                   z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device)
+
 
 if __name__ == '__main__':
     main()
