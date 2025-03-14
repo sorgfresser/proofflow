@@ -512,7 +512,7 @@ def train_gflownet(
             trajs = [replay_buffer[i] for i in idxs_replay] + [precomputed_trajectories[i] for i in idxs_precomputed]
 
         # TODO: check this isn't always 0
-        print(policy.model.z_head.grad)
+        #print(loss.grad) if loss is not None else None
 
         # 2. call the model on each trajectory
 
