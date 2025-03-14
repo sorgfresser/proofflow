@@ -396,6 +396,7 @@ def train_gflownet(
                         tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
                                                                        temperature=1)
                         current_idx = 0
+                        print(tactic_strings)
                         for node in start_states:
                             if node.done:
                                 continue
