@@ -403,7 +403,7 @@ def train_gflownet(
                         # Only passes on valid tactics to expand, we might want to change this
                         tactics = [t for t, p in zip(tactic_strings[idx], invalid) if not p]
                         goals = [g for g, p in zip(goals, invalid) if not p]
-                        times_current = [t for t, p in zip(times, invalid) if not p]
+                        times_current = [t for t, p in zip(times_current, invalid) if not p]
                         indices = [i for i, p in zip(indices, invalid) if not p]
                         rewards = [r for r, p in zip(rewards, invalid) if not p]
                         currents[idx].expand(tactics, goals, times_current, rewards, indices)
