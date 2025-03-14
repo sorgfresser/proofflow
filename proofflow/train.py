@@ -106,10 +106,13 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                 metrics = {f"validation/{key}": value for key, value in metrics.items()}
                 wandb.log(metrics, step=current_step)
                 print(metrics)
+                print(f"Saving model to {checkpoint_path}")
+                policy.save(checkpoint_path)
             current_step += 1
         print(f"Epoch {epoch} done")
         print(f"Saving model to {checkpoint_path}")
         policy.save(checkpoint_path)
+        wandb.log_model(checkpoint_path, name=f"model-epoch-{epoch}")
     print("Training done")
     metrics = evaluate(policy, valid_data, eval_batch_size)
     metrics = {f"validation/{key}": value for key, value in metrics.items()}
@@ -142,7 +145,7 @@ def main():
     eval_data = TheoremDataset(LEAN_DOJO_PATH / "val.json")
     test_data = TheoremDataset(LEAN_DOJO_PATH / "test.json")
 
-    tokenizer = PreTrainedTokenizerFast(tokenizer_file="lean_tokenizer.json")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -166,9 +169,9 @@ def main():
     incomplete_proof_token = tokenizer.added_tokens_encoder["[INC]"]
     invalid_proof_token = tokenizer.added_tokens_encoder["[INV]"]
     tokenizer.pad_token = "[PAD]"
-    policy = MambaPolicy(model, config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
+    policy = MambaPolicy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
                          proofstate_sep_id, successful_proof_token, incomplete_proof_token,
-                         invalid_proof_token, tokenizer, device)
+                         invalid_proof_token, tokenizer, device, mamba_config=config)
 
     gradient_accumulation_steps = args.gradient_accumulation_steps
     batch_size = args.batch_size

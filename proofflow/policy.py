@@ -36,7 +36,7 @@ class MambaLMHeadModelWrapper(MambaLMHeadModel):
         return [i for i in self.parameters() if all(id(i) != id(j) for j in self.get_z_params())]
 
     def get_z_params(self):
-        return self.z_head[0].parameters()
+        return self.z_head.parameters()
 
 
 class Policy:
@@ -306,9 +306,9 @@ class Policy:
 
     @classmethod
     def from_file(cls, path: str | Path, model: nn.Module, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
-                  device: str = "cpu"):
+                  device: str = "cpu", strict: bool = True):
         result = torch.load(path)
-        model.load_state_dict(result["state_dict"])
+        model.load_state_dict(result["state_dict"], strict=strict)
         model.to(device)
         model.eval()
         return cls(model, result["eos_id"], result["proof_step_id"], result["proof_state_id"], result["tactics_id"],
@@ -318,12 +318,11 @@ class Policy:
 
 class MambaPolicy(Policy):
 
-    def __init__(self, model: nn.Module, mamba_config: MambaConfig,
-                 eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
+    def __init__(self, model: nn.Module, eos_id: int, proof_step_id: int, proof_state_id: int, tactics_id: int,
                  tactics_sep_id: int, proofstate_sep_id: int, successful_proof_token: int,
                  incomplete_proof_token: int, invalid_proof_token: int,
                  tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
-                 device: str = "cpu"):
+                 device: str = "cpu", mamba_config: MambaConfig | None = None):
         super().__init__(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, proofstate_sep_id,
                          successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
         self.config = mamba_config
@@ -345,12 +344,13 @@ class MambaPolicy(Policy):
         torch.save(result, path)
 
     @classmethod
-    def from_file(cls, path: str | Path, mamba_config: MambaConfig, eos_id: int, proof_step_id: int,
-                  proof_state_id: int, tactics_id: int, tactics_sep_id: int, proofstate_sep_id: int,
-                  successful_proof_token: int, incomplete_proof_token: int, invalid_proof_token: int,
-                  is_gflownet: bool, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
+    def from_file(cls, path: str | Path, is_gflownet: bool,
+                  tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast, device: str = "cpu"):
+        result = torch.load(path)
+        config = result["config"]
+        mamba_config = MambaConfig(**config)
         model = MambaLMHeadModelWrapper(mamba_config, device=device, is_gflownet=is_gflownet)
-        model.load_state_dict(torch.load(path, map_location=device))
-        return cls(model, mamba_config, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id,
-                   proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer,
-                   device)
+        # If gflownet, then we have uninitialized backhead, zhead
+        result = super().from_file(path, model, tokenizer, device, strict=not is_gflownet)
+        result.config = mamba_config
+        return result

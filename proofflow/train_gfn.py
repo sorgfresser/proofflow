@@ -411,6 +411,8 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument("--checkpoint-path", type=str, default="model.pt")
+    parser.add_argument("--reload-checkpoint", action="store_true", default=False)
     args = parser.parse_args()
 
 
@@ -444,16 +446,28 @@ def main():
 
     tokenizer.pad_token = "[PAD]"
 
+    checkpoint_path = Path(args.checkpoint_path)
+
     # TODO: we should pretrain with the same state formulation as the GFlowNet implementation
-    policy = MambaPolicy.from_file("../model_small.pt", config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, proofstate_sep_id,
-                                   successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
+    if args.reload_checkpoint:
+        policy = MambaPolicy.from_file(checkpoint_path, True, tokenizer, device)
+    else:
+        config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
+        model = MambaLMHeadModelWrapper(config, device=device, is_gflownet=True)
+        policy = MambaPolicy(model, config, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
+                             proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token,
+                             tokenizer, device)
+    policy.model.train()
+
+    # policy = Policy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, proofstate_sep_id,
+    #                 successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
 
     gradient_accumulation_steps = args.gradient_accumulation_steps
     batch_size = args.batch_size
     rounds = args.rounds
 
-    optimizer = optim.AdamW(model.get_non_z_params())
-    z_optimizer = optim.AdamW(model.get_z_params())
+    optimizer = optim.AdamW(policy.model.get_non_z_params())
+    z_optimizer = optim.AdamW(policy.model.get_z_params())
 
     # TODO: add lr scheduler?
     precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)

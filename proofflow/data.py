@@ -6,7 +6,7 @@ from lean_repl_py import LeanREPLProofState, LeanREPLHandler
 from torch.utils.data import Dataset
 import re
 
-LEAN_DOJO_PATH = Path("../leandojo_benchmark_4/random")
+LEAN_DOJO_PATH = Path("./leandojo_benchmark_4/random")
 
 ATTRIBUTE_REGEX = re.compile(r"@\[\s*(?:[^\[\]]|\[(?:[^\]]|\[[^\]]*\])*\])*\]")
 BY_REGEX = re.compile(r":=\s*by\s+")
