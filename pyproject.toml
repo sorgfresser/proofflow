@@ -11,6 +11,7 @@ lean-repl-py = "^0.1.10"
 torch = "^2.6.0"
 transformers = "^4.49.0"
 wandb = "^0.19.8"
+torch-scatter = "^2.1.2"
 
 [[tool.poetry.source]]
 name = "pytorch-cpu"
