@@ -543,8 +543,8 @@ def train_gflownet(
         bck_padded = policy.tokenizer.pad({"input_ids": bck_inputs}, padding_side="right", return_tensors="pt")
 
         with torch.autocast(device_type=device, dtype=torch.float16):
-            fwd_outputs = policy.model(fwd_padded.input_ids)
-            bck_outputs = policy.model.p_b(bck_padded.input_ids)
+            fwd_outputs = policy.model(fwd_padded.input_ids.to(device))
+            bck_outputs = policy.model.p_b(bck_padded.input_ids.to(device))
             # Fill log probs for tactic tokens
             fwd_log = torch.log_softmax(fwd_outputs, dim=-1)
             bck_log = torch.log_softmax(bck_outputs, dim=-1)
