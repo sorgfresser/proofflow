@@ -18,7 +18,7 @@ handler.send_tactic("constructor", proof_state.proof_state)
 
 response, _ = handler.receive_json()
 
-tokenizer = PreTrainedTokenizerFast(tokenizer_file="lean_tokenizer.json")
+tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 eos_id = tokenizer.added_tokens_encoder["[EOS]"]
 proofstate_id = tokenizer.added_tokens_encoder["[PROOFSTATE]"]
 proofstep_id = tokenizer.added_tokens_encoder["[PROOFSTEP]"]
@@ -41,5 +41,6 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 policy = MambaPolicy.from_file("../model_small.pt", False, tokenizer, device)
 
 print(policy.next_tactics(response.goals[0], k=10))
+print(policy.next_tactics(response.goals, k=10, temperature=0.1))
 print(policy.next_tactic(response.goals[0], temperature=0.1))
 print(policy.next_tactic(response.goals, temperature=0.1))
