@@ -424,11 +424,11 @@ def train_gflownet(
                     print(f"Error in MCTS: {e}")
                     print(f"Node: {node.root.proof_state}")
                     print(f"Proof: {node.proof}")
-                    print(f"Current: {currents[current_idx].proof_state}")
-                    print(f"Current previous states: {currents[current_idx].previous_states}")
-                    print(f"Current tactic strings: {tactic_strings[current_idx]}")
+                    print(f"Current: {current.proof_state}")
+                    print(f"Current previous states: {current.previous_states}")
+                    print(f"Current tactic strings: {tactic_strings}")
                     strings = []
-                    node = currents[current_idx]
+                    node = current
                     while node.parent is not None:
                         strings.append(node.parent_tactic)
                         node = node.parent
