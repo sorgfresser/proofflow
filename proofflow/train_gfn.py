@@ -378,45 +378,52 @@ def train_gflownet(
             done = [False] * len(start_states)
             idx = 0
             while not all([node.done for node in start_states]) and idx < MAX_TRAJ_LEN:
-                for _ in range(MCTS_COUNT):
-                    if all(node.done for node in start_states):
-                        print(f"Breaking after {_} steps!")
-                        break
-                    currents = []
-                    for node in start_states:
-                        if node.done:
-                            continue
-                        current = node.select()
-                        assert not current.has_been_expanded
-                        assert not current.branch_is_done
-                        currents.append(current)
-                    end_states = [current.proof_state for current in currents]
-                    histories = [current.previous_states for current in currents]
-                    tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
-                                                                   temperature=1)
-                    current_idx = 0
-                    for node in start_states:
-                        if node.done:
-                            continue
-                        proven, invalid, indices, goals, times_current = _env_expand(handler, tactic_strings[current_idx], [currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx]))
-                        rewards = _compute_rewards(proven, invalid, times_current)
+                try:
+                    for _ in range(MCTS_COUNT):
+                        if all(node.done for node in start_states):
+                            print(f"Breaking after {_} steps!")
+                            break
+                        currents = []
+                        for node in start_states:
+                            if node.done:
+                                continue
+                            current = node.select()
+                            assert not current.has_been_expanded
+                            assert not current.branch_is_done
+                            currents.append(current)
+                        end_states = [current.proof_state for current in currents]
+                        histories = [current.previous_states for current in currents]
+                        tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
+                                                                       temperature=1)
+                        current_idx = 0
+                        for node in start_states:
+                            if node.done:
+                                continue
+                            proven, invalid, indices, goals, times_current = _env_expand(handler, tactic_strings[current_idx], [currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx]))
+                            rewards = _compute_rewards(proven, invalid, times_current)
 
-                        # Only passes on valid tactics to expand, we might want to change this
-                        tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
-                        goals = [g for g, p in zip(goals, invalid) if not p]
-                        times_current = [t for t, p in zip(times_current, invalid) if not p]
-                        indices = [i for i, p in zip(indices, invalid) if not p]
-                        rewards = [r for r, p in zip(rewards, invalid) if not p]
-                        currents[current_idx].expand(tactics, goals, times_current, rewards, indices)
-                        if any(proven):
-                            node.done = True
-                            node.solved = True
-                            node.last_tactic = tactic_strings[current_idx][proven.index(True)]
-                        # Edge case, if we only have invalid tactics, there is no way to continue
-                        if currents[current_idx] == node.root and all(invalid):
-                            node.done = True
-                            node.solved = False
-                        current_idx += 1
+                            # Only passes on valid tactics to expand, we might want to change this
+                            tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
+                            goals = [g for g, p in zip(goals, invalid) if not p]
+                            times_current = [t for t, p in zip(times_current, invalid) if not p]
+                            indices = [i for i, p in zip(indices, invalid) if not p]
+                            rewards = [r for r, p in zip(rewards, invalid) if not p]
+                            currents[current_idx].expand(tactics, goals, times_current, rewards, indices)
+                            if any(proven):
+                                node.done = True
+                                node.solved = True
+                                node.last_tactic = tactic_strings[current_idx][proven.index(True)]
+                            # Edge case, if we only have invalid tactics, there is no way to continue
+                            if currents[current_idx] == node.root and all(invalid):
+                                node.done = True
+                                node.solved = False
+                            current_idx += 1
+                except Exception as e:
+                    print(f"Error in MCTS: {e}")
+                    print(f"Node: {node.root.proof_state}")
+                    print(f"Start theorems: {start_theorems}")
+                    print(f"Proof: {node.proof}")
+                    raise e
                 # Actual MCTS move after trying a few nodes
                 for node in start_states:
                     node.move()
@@ -552,8 +559,8 @@ def train_gflownet(
             bck_log = torch.log_softmax(bck_outputs, dim=-1)
             for idx in range(len(fwd_log)):
                 for i in range(len(actions[idx])):
-                    log_p_f[idx] += fwd_log[idx, len(prev_states[idx]) + i, actions[i][-1]]
-                    log_p_b[idx] += bck_log[idx, len(next_states[idx]) + i, actions[i][-1]]
+                    log_p_f[idx] += fwd_log[idx, len(prev_states[idx]) + i, actions[idx][i][-1]]
+                    log_p_b[idx] += bck_log[idx, len(next_states[idx]) + i, actions[idx][i][-1]]
 
         # for states, actions in trajs:
         #     for prev_state, action, next_state in zip(states[:-1], actions, states[1:]):
@@ -578,8 +585,7 @@ def train_gflownet(
         #         idx += 1
 
         # 3. compute TB loss with TLM backward policy
-
-        log_rewards_tensor = torch.tensor(log_rewards, device=device)
+        log_rewards_tensor = torch.tensor([reward for _, _, reward in trajs], device=device)
 
         batch_idx = torch.arange(len(traj_lens), device=device).repeat_interleave(traj_lens)
 
