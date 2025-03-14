@@ -431,7 +431,7 @@ def train_gflownet(
                     if start_states[i].done and start_states[i].solved:
                         done[i] = True
                         state_trajectories[i].append([policy.successful_proof_token])
-                        log_rewards[i] = log(10) + log(1 - exp(-times[i] / 5))
+                        log_rewards[i] = log(10) - times[i] / 5
                     elif start_states[i].done:
                         state_trajectories[i].append([policy.invalid_proof_token])
                         log_rewards[i] = log(0.01)
