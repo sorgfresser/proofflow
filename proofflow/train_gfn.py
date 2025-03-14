@@ -394,27 +394,29 @@ def train_gflownet(
                     histories = [current.previous_states for current in currents]
                     tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
                                                                    temperature=1)
-                    for idx, node in enumerate(start_states):
+                    current_idx = 0
+                    for node in start_states:
                         if node.done:
                             continue
-                        proven, invalid, indices, goals, times_current = _env_expand(handler, tactic_strings[idx], [currents[idx].proof_state_idx] * len(tactic_strings[idx]))
+                        proven, invalid, indices, goals, times_current = _env_expand(handler, tactic_strings[current_idx], [currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx]))
                         rewards = _compute_rewards(proven, invalid, times_current)
 
                         # Only passes on valid tactics to expand, we might want to change this
-                        tactics = [t for t, p in zip(tactic_strings[idx], invalid) if not p]
+                        tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
                         goals = [g for g, p in zip(goals, invalid) if not p]
                         times_current = [t for t, p in zip(times_current, invalid) if not p]
                         indices = [i for i, p in zip(indices, invalid) if not p]
                         rewards = [r for r, p in zip(rewards, invalid) if not p]
-                        currents[idx].expand(tactics, goals, times_current, rewards, indices)
+                        currents[current_idx].expand(tactics, goals, times_current, rewards, indices)
                         if any(proven):
                             node.done = True
                             node.solved = True
-                            node.last_tactic = tactic_strings[idx][proven.index(True)]
+                            node.last_tactic = tactic_strings[current_idx][proven.index(True)]
                         # Edge case, if we only have invalid tactics, there is no way to continue
-                        if currents[idx] == node.root and all(invalid):
+                        if currents[current_idx] == node.root and all(invalid):
                             node.done = True
                             node.solved = False
+                        current_idx += 1
                 # Actual MCTS move after trying a few nodes
                 for node in start_states:
                     node.move()
