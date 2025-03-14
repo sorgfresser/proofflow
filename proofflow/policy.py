@@ -188,7 +188,7 @@ class Policy:
                      tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                      previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
                      temperature: float = 0.0, max_new_tokens: int = 20) -> \
-                            Tuple[Union[List[List[str]], List[str]], Union[List[List[List[int]]], List[List[int]]], Union[List[str], str]]:
+                            Tuple[Union[List[List[str]], List[str]], Union[List[List[List[int]]], List[List[int]]], Union[List[List[int]], List[int]]]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
         Additionally, return the tokenization and prompts generated.
 
@@ -219,7 +219,6 @@ class Policy:
         prompts = [self._build_prompt(proof_state, preceding_tactics, preceding_states)
                     for proof_state, preceding_tactics, preceding_states in
                     zip(proof_states, tactics_so_far, previous_proof_states)]
-        prompt_lens = torch.tensor([len(p) for p in prompts])
         prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_attention_mask=True,
                                             return_tensors="pt")
         # Will repeat the prompt k times for each proof state one by one
@@ -228,10 +227,11 @@ class Policy:
                                                                                                                    1])
         tactics = []
         idx = 0
-        eos = torch.tensor([False] * len(prompts))
-        while not all(eos) and idx < max_new_tokens:
+        eos = torch.zeros(prompt_tensor.shape[0], dtype=torch.bool, device=self.device)
+        while not eos.all() and idx < max_new_tokens:
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                logits = self.model(prompt_tensor)[:, prompt_lens-1, ...]
+                # Only take the last token for sampling next tokens, classical language model
+                logits = self.model(prompt_tensor)[:, -1, ...].squeeze(1)
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
                 tokens = torch.multinomial(softmaxed, 1).squeeze(1)
@@ -243,17 +243,19 @@ class Policy:
             tactics.append(tokens)
             idx += 1
         tactics = torch.stack(tactics, dim=1)
-        tactics = tactics[:, :-1]
+        tactics = tactics[:, :-1] # Remove the last token, which is the eos token
+        tactics = tactics.reshape(len(proof_states), k, tactics.shape[1])
         tactics = tactics.tolist()
 
         result_ids = [[] for _ in range(len(proof_states))]
-        for idx, tactic in enumerate(tactics):
-            result = []
-            for token in tactic:
-                if token == self.eos_token:
-                    break
-                result.append(token)
-            result_ids[idx % len(proof_states)].append(result)
+        for proof_state_idx in range(len(tactics)):
+            for tactic in tactics[proof_state_idx]:
+                result = []
+                for token in tactic:
+                    if token == self.eos_token:
+                        break
+                    result.append(token)
+                result_ids[proof_state_idx].append(result)
         if output_single:
             return self.tokenizer.batch_decode(result_ids[0]), result_ids[0], prompts[0]
         return [self.tokenizer.batch_decode(result) for result in result_ids], result_ids, prompts

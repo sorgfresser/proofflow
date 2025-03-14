@@ -442,7 +442,7 @@ def main():
                              proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token,
                              tokenizer, device, mamba_config=config)
     policy.model.train()
-    policy.model = torch.compile(policy.model)
+    #policy.model = torch.compile(policy.model)
     torch.backends.cudnn.benchmark = True
 
     # policy = Policy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, proofstate_sep_id,
