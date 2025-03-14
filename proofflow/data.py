@@ -17,6 +17,7 @@ MAX_WS = r"^\s*"
 class UnknownMetaVariableError(RuntimeError):
     pass
 
+
 class TrainingSample(BaseModel):
     proof_state: str
     tactic: str
@@ -312,12 +313,19 @@ class TrainSampleDataset(TheoremDataset):
     def __init__(self, json_path: Path):
         super().__init__(json_path)
         self.samples = [sample for thm in self.thms for sample in thm.to_samples()]
+        self._filter_length(20_000)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, item) -> TrainingSample:
         return self.samples[item]
+
+    def _filter_length(self, length: int) -> None:
+        self.samples = [sample for sample in self.samples if len(sample.proof_state) + len(sample.tactic) + sum(
+            len(tac) for tac in sample.tactics_so_far) + sum(
+            len(state) for state in sample.proof_states_so_far) < length]
+        # 48114 if filtered to 20_000, so we are missing round about 2000 batches till the full 50163
 
 
 if __name__ == '__main__':
