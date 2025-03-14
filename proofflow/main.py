@@ -38,10 +38,7 @@ config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=12, d_model=240)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-policy = MambaPolicy.from_file("../model_small.pt", config, eos_id, proofstep_id, proofstate_id, tactics_id,
-                               tactics_sep_id,
-                               proofstate_sep_id, successful_proof_token, incomplete_proof_token,
-                               invalid_proof_token, False, tokenizer, device)
+policy = MambaPolicy.from_file("../model_small.pt", False, tokenizer, device)
 
 print(policy.next_tactics(response.goals[0], k=10))
 print(policy.next_tactic(response.goals[0], temperature=0.1))
