@@ -410,7 +410,7 @@ def train_gflownet(
                         if any(proven):
                             node.done = True
                             node.solved = True
-                            node.last_tactic = tactics[proven.index(True)]
+                            node.last_tactic = tactic_strings[idx][proven.index(True)]
                         # Edge case, if we only have invalid tactics, there is no way to continue
                         if currents[idx] == node.root and all(invalid):
                             node.done = True
