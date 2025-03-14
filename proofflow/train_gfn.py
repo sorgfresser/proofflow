@@ -185,9 +185,9 @@ def train_gflownet(
     replay_buffer = [None] * replay_buffer_len
     replay_end, replay_saturated = 0, False
 
-    tb_loss_agg = back_loss_agg = 0
 
     for r in tqdm(range(rounds)):
+        tb_loss_agg = back_loss_agg = 0
         # Reset the handler to avoid memory leaks
         handler = handler_factory()
 
@@ -405,10 +405,10 @@ def main():
     parser.add_argument("--reload-checkpoint", action="store_true", default=False)
     args = parser.parse_args()
 
-    handler_factory = lambda: LeanREPLHandler(Path("../leanproject"))
+    handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
     start_theorems = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
 
-    tokenizer = PreTrainedTokenizerFast(tokenizer_file="lean_tokenizer.json")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -458,7 +458,7 @@ def main():
     # TODO: add lr scheduler?
     precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
 
-    train_gflownet(policy, start_theorems, precomputed_trajectories, handler_factory, Path("../mathlib4"), optimizer,
+    train_gflownet(policy, start_theorems, precomputed_trajectories, handler_factory, Path("./mathlib4"), optimizer,
                    z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device)
 
 
