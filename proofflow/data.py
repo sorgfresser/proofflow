@@ -208,7 +208,7 @@ class Theorem(BaseModel):
                 compare_self = re.sub(WS, "", compare_self)
                 compare_other = self.traced_tactics[0].state_before.strip().replace("\n", " ")
                 compare_other = re.sub(WS, "", compare_other)
-                assert compare_self == compare_other
+                assert compare_self == compare_other, compare_self + " != " + compare_other
 
                 # it says goals, but since this is the start of the proof state, should only be one
                 assert tactic["goals"].count("⊢") == 1
