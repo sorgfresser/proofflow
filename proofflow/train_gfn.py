@@ -431,12 +431,14 @@ def train_gflownet(
                     print(f"Current tactic strings: {tactic_strings}")
                     print(f"Start states: {[state.root.proof_state for state in start_states]}")
                     print(f"Current metadata: {current.metadata}")
+                    print(f"Node metadata: {node.root.metadata}")
                     strings = []
                     node = current
                     while node.parent is not None:
                         strings.append(node.parent_tactic)
                         node = node.parent
-                    print(f"Current proof: {' '.join(reversed(strings))}")
+                    current_proof = "\n".join(reversed(strings))
+                    print(f"Current proof: {current_proof}")
                     raise e
                 # Actual MCTS move after trying a few nodes
                 for node in start_states:
