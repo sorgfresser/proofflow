@@ -440,17 +440,17 @@ def train_gflownet(
                     node.move()
                 # Fill trajectories with the latest move, update rewards
                 prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) for node in start_states]
-                for i in range(batch_size_replay):
+                for i, node in enumerate(start_states):
                     if done[i]: continue
                     state_trajectories[i].append(prompts[i])
                     # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
-                    action_trajectories[i].append(policy.tokenizer.encode(start_states[i].last_tactic) + [policy.tokenizer.eos_token_id])
-                    proof_state_history[i].append(start_states[i].root.proof_state)
-                    if start_states[i].done and start_states[i].solved:
+                    action_trajectories[i].append(policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
+                    proof_state_history[i].append(node.root.proof_state)
+                    if node.done and node.solved:
                         done[i] = True
                         state_trajectories[i].append([policy.successful_proof_token])
                         log_rewards[i] = log(10) - times[i] / 5
-                    elif start_states[i].done:
+                    elif node.done:
                         state_trajectories[i].append([policy.invalid_proof_token])
                         log_rewards[i] = log(0.01)
                         done[i] = True
