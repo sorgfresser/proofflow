@@ -28,7 +28,6 @@ MAX_TRAJ_LEN = 10
 MAX_OUTPUT_LEN = 20
 GET_STATE_EVERY = 2  # we want semantically similar proofs to have the same states. Increasing this helps to do that
 TEMPERATURE = 1
-MCTS_COUNT = 100
 
 
 class ModelBlock(nn.Module):
@@ -342,7 +341,8 @@ def train_gflownet(
         rounds: int,
         device: str,
         replay_buffer_len: int = 1_000,
-        max_retries: int = 5
+        max_retries: int = 5,
+        search_time: int = 100
 ):
     assert precomputed_trajectories
     policy.model.train()
@@ -376,7 +376,7 @@ def train_gflownet(
                 try:
                     start_time = time.perf_counter()
                     next_tactic_time = 0
-                    for _ in range(MCTS_COUNT):
+                    for _ in range(search_time):
                         if all(node.done for node in start_states):
                             print(f"Breaking after {_} steps!")
                             break
@@ -669,6 +669,7 @@ def main():
     parser.add_argument("--reload-checkpoint", action="store_true", default=False)
     parser.add_argument("--num-tactics", type=int, default=10, help="Number of tactics to sample from the policy per state")
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--search-time", type=int, default=100, help="Number of MCTS nodes to explore before selecting a tactic")
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
@@ -727,7 +728,7 @@ def main():
     precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
 
     train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer,
-                   z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device, max_retries=args.num_tactics)
+                   z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device, max_retries=args.num_tactics, search_time=args.search_time)
 
 
 if __name__ == '__main__':
