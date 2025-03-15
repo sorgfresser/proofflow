@@ -367,11 +367,15 @@ def train_gflownet(
     tb_loss_agg = back_loss_agg = 0
     for r in tqdm(range(rounds)):
         # Reset the handler to avoid memory leaks
+        start_time = time.perf_counter()
         handler = handler_factory()
+        print(f"Handler creation time: {time.perf_counter() - start_time}")
 
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
+            start_time = time.perf_counter()
             envs, start_states = _get_start_states(batch_size_replay, start_theorems, handler, repo_path)
+            print(f"Get start states time: {time.perf_counter() - start_time}")
             action_trajectories = [[] for __ in start_states]  # list of actions for each proof
             state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
             proof_state_history = [[node.root.proof_state] for node in start_states]  # list of proof states for each proof
@@ -381,6 +385,7 @@ def train_gflownet(
             idx = 0
             while not all([node.done for node in start_states]) and idx < MAX_TRAJ_LEN:
                 try:
+                    start_time = time.perf_counter()
                     for _ in range(MCTS_COUNT):
                         if all(node.done for node in start_states):
                             print(f"Breaking after {_} steps!")
@@ -440,6 +445,7 @@ def train_gflownet(
                     current_proof = "\n".join(reversed(strings))
                     print(f"Current proof: {current_proof}")
                     raise e
+                print(f"MCTS time: {time.perf_counter() - start_time}")
                 # Actual MCTS move after trying a few nodes
                 for node in start_states:
                     node.move()
