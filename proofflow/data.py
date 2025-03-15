@@ -201,6 +201,7 @@ class Theorem(BaseModel):
         tactics = response["tactics"]
         contains_error = any(msg.severity == "error" for msg in response.get("messages", []))
         if contains_error:
+            import pdb; pdb.set_trace()
             raise RuntimeError("Error in manifesting theorem")
         for tactic in tactics:
             if tactic["pos"]["line"] >= self.start.line:
@@ -214,6 +215,7 @@ class Theorem(BaseModel):
                 assert tactic["goals"].count("⊢") == 1
                 tactic["goal"] = tactic["goals"]
                 return LeanREPLProofState.model_validate(tactic)
+        import pdb; pdb.set_trace()
         raise RuntimeError("This should never happen!")
 
     def _lines(self, repo_path) -> list[str]:
