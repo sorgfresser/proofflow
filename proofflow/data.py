@@ -305,6 +305,8 @@ class TheoremDataset(Dataset):
     def __init__(self, json_path: Path):
         self.json_path = json_path
         self.thms = list(parse_json(json_path))
+        # Filter to only theorems with traced tactics
+        self.thms = list(filter(lambda thm: thm.traced_tactics, self.thms))
 
     def __len__(self):
         return len(self.thms)
@@ -344,8 +346,6 @@ class ProofStateDataset(TheoremDataset):
     def __getitem__(self, item) -> Optional[Tuple[LeanREPLHandler, LeanREPLProofState, Theorem]]:
         thm = super().__getitem__(item)
         handler = self.handler_factory()
-        if not thm.traced_tactics:
-            return None
         try:
             proof_state = thm.to_proof_state(handler, repo_path=self.repo_path)
         except UnknownMetaVariableError:
