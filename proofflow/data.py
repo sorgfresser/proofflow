@@ -1,6 +1,6 @@
 from pathlib import Path
 import json
-from typing import Any, Sequence, Generator
+from typing import Any, Sequence, Generator, Callable, Tuple, Optional
 from pydantic import BaseModel, model_validator
 from lean_repl_py import LeanREPLProofState, LeanREPLHandler
 from torch.utils.data import Dataset
@@ -326,6 +326,25 @@ class TrainSampleDataset(TheoremDataset):
             len(tac) for tac in sample.tactics_so_far) + sum(
             len(state) for state in sample.proof_states_so_far) < length]
         # 48114 if filtered to 20_000, so we are missing round about 2000 batches till the full 50163
+
+
+class ProofStateDataset(TheoremDataset):
+    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path):
+        super().__init__(json_path)
+        self.handler_factory = handler_factory
+        self.repo_path = repo_path
+
+    def __len__(self):
+        return len(self.thms)
+
+    def __getitem__(self, item) -> Optional[Tuple[LeanREPLHandler, LeanREPLProofState, Theorem]]:
+        thm = super().__getitem__(item)
+        handler = self.handler_factory()
+        try:
+            proof_state = thm.to_proof_state(handler, repo_path=self.repo_path)
+        except UnknownMetaVariableError:
+            return None
+        return handler, proof_state, thm
 
 
 if __name__ == '__main__':

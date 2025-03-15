@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import exp, log
 import time
 from collections import defaultdict
-from typing import Tuple, List, Union, Dict, Any
+from typing import Tuple, List, Union, Dict, Any, Iterator
 
 from torch import nn
 import torch
@@ -12,7 +12,7 @@ from torch_scatter import scatter
 from lean_repl_py import LeanREPLHandler, LeanREPLNextProofState, LeanREPLProofState
 from proofflow.model.ffm import FFM
 from proofflow.data import parse_json, LEAN_DOJO_PATH, TheoremDataset, TrainSampleDataset, TrainingSample, Theorem, \
-    UnknownMetaVariableError
+    UnknownMetaVariableError, ProofStateDataset
 from pathlib import Path
 from torch.utils.data import DataLoader
 from proofflow.policy import Policy, MambaLMHeadModelWrapper, MambaPolicy
@@ -283,21 +283,11 @@ class MCTS:
         return node
 
 
-def _get_start_states(batch_size_replay: int, start_theorems: List[Theorem], handler: LeanREPLHandler,
-                      repo_path: Path) -> Tuple[List[LeanREPLProofState], List[MCTS]]:
-    nodes = []
-    envs = []
-    while len(nodes) < batch_size_replay:
-        idxs = torch.randint(0, len(start_theorems), (batch_size_replay - len(nodes),))
-        selected_start_thms = [start_theorems[idx] for idx in idxs]
-        for i, thm in enumerate(selected_start_thms):
-            try:
-                proof_state = thm.to_proof_state(handler, repo_path=repo_path)
-            except UnknownMetaVariableError:
-                continue
-            nodes.append(Node(proof_state.goal, proof_state_idx=proof_state.proof_state, metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}))
-            envs.append(proof_state)
-    return envs, [MCTS(node) for node in nodes]
+def _get_start_states(start_loader: Iterator) -> Tuple[List[LeanREPLProofState], List[MCTS], List[LeanREPLHandler]]:
+    batch = next(start_loader)
+    handlers, envs, thms = [elem[0] for elem in batch], [elem[1] for elem in batch], [elem[2] for elem in batch]
+    nodes = [Node(proof_state.goal, proof_state_idx=proof_state.proof_state, metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}) for proof_state, thm in zip(envs, thms)]
+    return envs, [MCTS(node) for node in nodes], handlers
 
 def _env_expand(handler: LeanREPLHandler, tactics: List[str], proof_state_indices: List[int]):
     proven = []
@@ -340,10 +330,9 @@ def _compute_rewards(proven: List[bool], invalid: List[bool], times: List[float]
 
 def train_gflownet(
         policy: Policy,
-        start_theorems: List[Theorem],
+        start_loader: DataLoader,
         precomputed_trajectories: List[Tuple[List[List[int]], List[List[int]]]],
         # these are the human-written trajectories
-        handler_factory: Callable[[], LeanREPLHandler],
         repo_path: Path,
         optimizer: optim.Optimizer,
         z_optimizer: optim.Optimizer,
@@ -365,6 +354,7 @@ def train_gflownet(
     replay_end, replay_saturated = 0, False
 
     tb_loss_agg = back_loss_agg = 0
+    samples_iter = iter(start_loader)
     for r in tqdm(range(rounds)):
         # Reset the handler to avoid memory leaks
         start_time = time.perf_counter()
@@ -374,7 +364,7 @@ def train_gflownet(
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
             start_time = time.perf_counter()
-            envs, start_states = _get_start_states(batch_size_replay, start_theorems, handler, repo_path)
+            _, start_states, handlers = _get_start_states(samples_iter)
             print(f"Get start states time: {time.perf_counter() - start_time}")
             action_trajectories = [[] for __ in start_states]  # list of actions for each proof
             state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
@@ -404,10 +394,10 @@ def train_gflownet(
                                                                        temperature=1)
                         current_idx = 0
                         print("Tactic strings", tactic_strings)
-                        for node in start_states:
+                        for i, node in enumerate(start_states):
                             if node.done:
                                 continue
-                            proven, invalid, indices, goals, times_current = _env_expand(handler, tactic_strings[current_idx], [currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx]))
+                            proven, invalid, indices, goals, times_current = _env_expand(handlers[i], tactic_strings[current_idx], [currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx]))
                             print("Proven, invalid etc", proven, invalid, indices, goals, times_current)
                             rewards = _compute_rewards(proven, invalid, times_current)
 
@@ -415,7 +405,7 @@ def train_gflownet(
                             tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
                             goals = [g for g, p in zip(goals, invalid) if not p]
                             times_current = [t for t, p in zip(times_current, invalid) if not p]
-                            indices = [i for i, p in zip(indices, invalid) if not p]
+                            indices = [index for index, p in zip(indices, invalid) if not p]
                             rewards = [r for r, p in zip(rewards, invalid) if not p]
                             currents[current_idx].expand(tactics, goals, times_current, rewards, indices)
                             if any(proven):
@@ -659,6 +649,10 @@ def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTr
     return precomputed_trajectories
 
 
+def collate_skip_none(batch):
+    return [i for i in batch if i is not None]
+
+
 def main():
     torch.set_float32_matmul_precision('high')
 
@@ -671,10 +665,13 @@ def main():
     parser.add_argument("--checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--reload-checkpoint", action="store_true", default=False)
     parser.add_argument("--num-tactics", type=int, default=10, help="Number of tactics to sample from the policy per state")
+    parser.add_argument("--num-workers", type=int, default=0)
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
     start_theorems = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
+    start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"))
+    start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none, num_workers=args.num_workers)
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
@@ -726,7 +723,7 @@ def main():
     # TODO: add lr scheduler?
     precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
 
-    train_gflownet(policy, start_theorems, precomputed_trajectories, handler_factory, Path("./mathlib4"), optimizer,
+    train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer,
                    z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device, max_retries=args.num_tactics)
 
 
