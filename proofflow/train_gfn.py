@@ -213,7 +213,7 @@ class Node:
         self.branch_is_done = True
         if self.parent is None:
             return
-        if all(child.branch_is_done for child in self.children_for_tactics.values()):
+        if all(child.branch_is_done for child in self.parent.children_for_tactics.values()):
             self.parent.backup_branch_done()
 
     def action_values(self):
