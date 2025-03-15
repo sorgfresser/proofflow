@@ -309,7 +309,7 @@ class TheoremDataset(Dataset):
     def __len__(self):
         return len(self.thms)
 
-    def __getitem__(self, item):
+    def __getitem__(self, item) -> Theorem:
         return self.thms[item]
 
 
@@ -344,6 +344,8 @@ class ProofStateDataset(TheoremDataset):
     def __getitem__(self, item) -> Optional[Tuple[LeanREPLHandler, LeanREPLProofState, Theorem]]:
         thm = super().__getitem__(item)
         handler = self.handler_factory()
+        if not thm.traced_tactics:
+            return None
         try:
             proof_state = thm.to_proof_state(handler, repo_path=self.repo_path)
         except UnknownMetaVariableError:
