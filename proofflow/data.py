@@ -198,6 +198,8 @@ class Theorem(BaseModel):
         # Known bug in Lean REPL
         if response.get("message") == "unknown metavariable '?[anonymous]'":
             raise UnknownMetaVariableError("Unknown metavariable '?[anonymous]'")
+        if "tactics" not in response:
+            import pdb; pdb.set_trace()
         tactics = response["tactics"]
         contains_error = any(msg.severity == "error" for msg in response.get("messages", []))
         if contains_error:
