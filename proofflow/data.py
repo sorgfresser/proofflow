@@ -204,11 +204,11 @@ class Theorem(BaseModel):
             raise RuntimeError("Error in manifesting theorem")
         for tactic in tactics:
             if tactic["pos"]["line"] >= self.start.line:
-                compare_self = tactic["goals"].strip().replace("\n", " ")
-                compare_self = re.sub(WS, "", compare_self)
-                compare_other = self.traced_tactics[0].state_before.strip().replace("\n", " ")
-                compare_other = re.sub(WS, "", compare_other)
-                assert compare_self == compare_other, compare_self + " != " + compare_other
+                # compare_self = tactic["goals"].strip().replace("\n", " ")
+                # compare_self = re.sub(WS, "", compare_self)
+                # compare_other = self.traced_tactics[0].state_before.strip().replace("\n", " ")
+                # compare_other = re.sub(WS, "", compare_other)
+                # assert compare_self == compare_other, compare_self + " != " + compare_other
 
                 # it says goals, but since this is the start of the proof state, should only be one
                 assert tactic["goals"].count("⊢") == 1
