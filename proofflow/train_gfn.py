@@ -375,6 +375,7 @@ def train_gflownet(
             while not all([node.done for node in start_states]) and idx < MAX_TRAJ_LEN:
                 try:
                     start_time = time.perf_counter()
+                    next_tactic_time = 0
                     for _ in range(MCTS_COUNT):
                         if all(node.done for node in start_states):
                             print(f"Breaking after {_} steps!")
@@ -389,8 +390,10 @@ def train_gflownet(
                             currents.append(current)
                         end_states = [current.proof_state for current in currents]
                         histories = [current.previous_states for current in currents]
+                        tactic_start_time = time.perf_counter()
                         tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
                                                                        temperature=1)
+                        next_tactic_time += time.perf_counter() - tactic_start_time
                         current_idx = 0
                         print("Tactic strings", tactic_strings)
                         for i, node in enumerate(start_states):
@@ -435,6 +438,7 @@ def train_gflownet(
                     print(f"Current proof: {current_proof}")
                     raise e
                 print(f"MCTS time: {time.perf_counter() - start_time}")
+                print(f"Next tactic time: {next_tactic_time}")
                 # Actual MCTS move after trying a few nodes
                 for node in start_states:
                     node.move()
