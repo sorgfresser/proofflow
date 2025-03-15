@@ -30,7 +30,6 @@ MAX_TRAJ_LEN = 10
 MAX_OUTPUT_LEN = 20
 GET_STATE_EVERY = 2  # we want semantically similar proofs to have the same states. Increasing this helps to do that
 TEMPERATURE = 1
-MCTS_COUNT = 100
 
 
 class ModelBlock(nn.Module):
@@ -417,7 +416,8 @@ def train_gflownet(
         rounds: int,
         device: str,
         replay_buffer_len: int = 1_000,
-        max_retries: int = 5
+        max_retries: int = 5,
+        search_time: int = 100
 ):
     assert precomputed_trajectories
     policy.model.train()
@@ -451,7 +451,8 @@ def train_gflownet(
             while not all([node.done for node in start_states]) and idx < MAX_TRAJ_LEN:
                 try:
                     start_time = time.perf_counter()
-                    for _ in range(MCTS_COUNT):
+                    next_tactic_time = 0
+                    for _ in range(search_time):
                         if all(node.done for node in start_states):
                             print(f"Breaking after {_} steps!")
                             break
@@ -465,8 +466,10 @@ def train_gflownet(
                             currents.append(current)
                         end_states = [current.proof_state for current in currents]
                         histories = [current.previous_states for current in currents]
+                        tactic_start_time = time.perf_counter()
                         tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
                                                                        temperature=1)
+                        next_tactic_time += time.perf_counter() - tactic_start_time
                         current_idx = 0
                         print("Tactic strings", tactic_strings)
                         for i, node in enumerate(start_states):
@@ -518,6 +521,7 @@ def train_gflownet(
                     print(f"Current proof: {current_proof}")
                     raise e
                 print(f"MCTS time: {time.perf_counter() - start_time}")
+                print(f"Next tactic time: {next_tactic_time}")
                 # Actual MCTS move after trying a few nodes
                 for node in start_states:
                     node.move()
@@ -751,6 +755,7 @@ def main():
     parser.add_argument("--num-tactics", type=int, default=10,
                         help="Number of tactics to sample from the policy per state")
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--search-time", type=int, default=100, help="Number of MCTS nodes to explore before selecting a tactic")
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
@@ -813,7 +818,7 @@ def main():
 
         train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer,
                        z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device,
-                       max_retries=args.num_tactics)
+                       max_retries=args.num_tactics, search_time=args.search_time)
 
 
 if __name__ == '__main__':
