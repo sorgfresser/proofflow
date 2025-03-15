@@ -664,6 +664,7 @@ def main():
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--reload-checkpoint", action="store_true", default=False)
+    parser.add_argument("--num-tactics", type=int, default=10, help="Number of tactics to sample from the policy per state")
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
@@ -720,7 +721,7 @@ def main():
     precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
 
     train_gflownet(policy, start_theorems, precomputed_trajectories, handler_factory, Path("./mathlib4"), optimizer,
-                   z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device)
+                   z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device, max_retries=args.num_tactics)
 
 
 if __name__ == '__main__':
