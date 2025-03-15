@@ -427,7 +427,7 @@ def train_gflownet(
                     print(f"Current: {current.proof_state}")
                     print(f"Current previous states: {current.previous_states}")
                     print(f"Current tactic strings: {tactic_strings}")
-                    print(f"Start states: {start_states}")
+                    print(f"Start states: {[state.root.proof_state for state in start_states]}")
                     strings = []
                     node = current
                     while node.parent is not None:
