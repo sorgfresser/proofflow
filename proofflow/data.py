@@ -307,6 +307,8 @@ class TheoremDataset(Dataset):
         self.thms = list(parse_json(json_path))
         # Filter to only theorems with traced tactics
         self.thms = list(filter(lambda thm: thm.traced_tactics, self.thms))
+        # Filter to not include .lake files
+        self.thms = list(filter(lambda thm: not ".lake" in thm.file_path, self.thms))
 
     def __len__(self):
         return len(self.thms)
