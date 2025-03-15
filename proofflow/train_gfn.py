@@ -396,12 +396,12 @@ def train_gflownet(
                         tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
                                                                        temperature=1)
                         current_idx = 0
-                        print(tactic_strings)
+                        print("Tactic strings", tactic_strings)
                         for node in start_states:
                             if node.done:
                                 continue
                             proven, invalid, indices, goals, times_current = _env_expand(handler, tactic_strings[current_idx], [currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx]))
-                            print(proven, invalid, indices, goals, times_current)
+                            print("Proven, invalid etc", proven, invalid, indices, goals, times_current)
                             rewards = _compute_rewards(proven, invalid, times_current)
 
                             # Only passes on valid tactics to expand, we might want to change this
@@ -416,7 +416,7 @@ def train_gflownet(
                                 node.solved = True
                                 node.last_tactic = tactic_strings[current_idx][proven.index(True)]
                             # Edge case, if we only have invalid tactics, there is no way to continue
-                            if currents[current_idx] == node.root and all(invalid):
+                            elif node.root.branch_is_done:
                                 node.done = True
                                 node.solved = False
                             current_idx += 1
