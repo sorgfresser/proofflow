@@ -4,16 +4,17 @@ from dataclasses import dataclass
 from math import exp, log
 import time
 from collections import defaultdict
-from typing import Tuple, List, Union, Dict, Any, Iterator
+from typing import Tuple, List, Union, Dict, Any, Iterator, Optional
 
 from torch import nn
 import torch
 from torch_scatter import scatter
-from lean_repl_py import LeanREPLHandler, LeanREPLNextProofState, LeanREPLProofState
+from lean_repl_py import LeanREPLHandler, LeanREPLNextProofState, LeanREPLProofState, LeanREPLAsyncHandler
 from proofflow.model.ffm import FFM
 from proofflow.data import parse_json, LEAN_DOJO_PATH, TheoremDataset, TrainSampleDataset, TrainingSample, Theorem, \
     UnknownMetaVariableError, ProofStateDataset
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from torch.utils.data import DataLoader
 from proofflow.policy import Policy, MambaLMHeadModelWrapper, MambaPolicy
 from transformers import PreTrainedTokenizerFast
@@ -23,6 +24,7 @@ import wandb
 from mamba_ssm.models.config_mamba import MambaConfig
 from tqdm import tqdm
 from argparse import ArgumentParser
+import asyncio
 
 MAX_TRAJ_LEN = 10
 MAX_OUTPUT_LEN = 20
@@ -247,7 +249,7 @@ class Node:
             return self
         action = self.best_action_policy()
         if self.children_for_tactics[action].branch_is_done:
-            assert self.branch_is_done # This has to imply -inf was chosen, so we should be done
+            assert self.branch_is_done  # This has to imply -inf was chosen, so we should be done
             return self
         return self.children_for_tactics[self.best_action_policy()].select()
 
@@ -283,13 +285,34 @@ class MCTS:
         return node
 
 
-def _get_start_states(start_loader: Iterator) -> Tuple[List[LeanREPLProofState], List[MCTS], List[LeanREPLHandler]]:
-    batch = next(start_loader)
-    handlers, envs, thms = [elem[0] for elem in batch], [elem[1] for elem in batch], [elem[2] for elem in batch]
-    nodes = [Node(proof_state.goal, proof_state_idx=proof_state.proof_state, metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}) for proof_state, thm in zip(envs, thms)]
-    return envs, [MCTS(node) for node in nodes], handlers
+def _get_start_states(start_loader: Iterator) -> Tuple[
+    List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]:
+    async def _gather_proof_states(futures):
+        return await asyncio.gather(*futures)
 
-def _env_expand(handler: LeanREPLHandler, tactics: List[str], proof_state_indices: List[int]):
+    start_time = time.perf_counter()
+    batch = next(start_loader)
+    print(f"Time to obtain batch: {time.perf_counter() - start_time}")
+    thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
+    start_time = time.perf_counter()
+    handlers = [LeanREPLAsyncHandler(Path("./leanproject")) for elem in paths]
+    # Start all REPLs
+    proof_state_futures = [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
+    # Gather
+    proof_states = asyncio.run(_gather_proof_states(proof_state_futures))
+    proof_states = [proof_state for proof_state, env in proof_states]
+    print(f"Time to unpickle batch: {time.perf_counter() - start_time}")
+    # Unlink them all, not needed anymore
+    for path in paths:
+        path.unlink()
+    assert all(len(proof_state.goals) == 1 for proof_state in proof_states)
+    nodes = [Node(proof_state.goals[0], proof_state_idx=proof_state.proof_state,
+                  metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}) for proof_state, thm in
+             zip(proof_states, thms)]
+    return proof_states, [MCTS(node) for node in nodes], handlers
+
+
+def _env_expand(handler: LeanREPLAsyncHandler, tactics: List[str], proof_state_indices: List[int]):
     proven = []
     invalid = []
     indices = []
@@ -297,8 +320,8 @@ def _env_expand(handler: LeanREPLHandler, tactics: List[str], proof_state_indice
     times = []
     for tactic, proof_state_idx in zip(tactics, proof_state_indices, strict=True):
         curr_time = time.perf_counter()
-        handler.send_tactic(tactic, proof_state_idx)
-        response, _ = handler.receive_json()
+        asyncio.run(handler.send_tactic(tactic, proof_state_idx))
+        response, _ = asyncio.run(handler.receive_json())
         times.append(time.perf_counter() - curr_time)
         if "message" in response and response["message"].startswith("Lean error"):
             invalid.append(True)
@@ -316,6 +339,58 @@ def _env_expand(handler: LeanREPLHandler, tactics: List[str], proof_state_indice
         indices.append(response.proof_state)
     return proven, invalid, indices, goals, times
 
+
+async def _process_single_env(handler: LeanREPLAsyncHandler, tactics: List[str], proof_state_indices: List[int],
+                              proven: List[bool], invalid: List[bool], indices: List[Optional[int]],
+                              goals: List[Optional[List[str]]], times: List[float]):
+    assert len(proven) == len(invalid) == len(indices) == len(goals) == 0
+    for tactic, proof_state_idx in zip(tactics, proof_state_indices, strict=True):
+        curr_time = time.perf_counter()
+        await handler.send_tactic(tactic, proof_state_idx)
+        response, _ = await handler.receive_json()
+        times.append(time.perf_counter() - curr_time)
+        if "message" in response and response["message"].startswith("Lean error"):
+            invalid.append(True)
+            proven.append(False)
+            indices.append(None)
+            goals.append(None)
+            continue
+        assert isinstance(response, LeanREPLNextProofState)
+        proven.append(not response.goals)
+        invalid.append(False)
+        if not response.goals:
+            goals.append(None)
+        else:
+            goals.append(response.goals[0])  # only need one goal, it has all information
+        indices.append(response.proof_state)
+
+async def _process_all_envs(handlers: List[LeanREPLAsyncHandler], tactics: List[List[str]],
+                            proof_state_indices: List[List[int]]):
+    proven = [[] for _ in handlers]
+    invalid = [[] for _ in handlers]
+    indices = [[] for _ in handlers]
+    goals = [[] for _ in handlers]
+    times = [[] for _ in handlers]
+    tasks = []
+    for i in range(len(handlers)):
+        tasks.append(
+            _process_single_env(handlers[i], tactics[i], proof_state_indices[i], proven[i], invalid[i], indices[i],
+                                goals[i], times[i]))
+    await asyncio.gather(*tasks)
+    return proven, invalid, indices, goals, times
+
+
+def _envs_expand(
+        handlers: list[LeanREPLAsyncHandler],
+        tactics: list[list[str]],
+        proof_state_indices: list[list[int]]
+):
+    """Sends one tactic at a time per handler"""
+    assert len(handlers) == len(tactics) == len(proof_state_indices)
+    proven, invalid, indices, goals, times = asyncio.run(_process_all_envs(handlers, tactics, proof_state_indices))
+    return proven, invalid, indices, goals, times
+
+
 def _compute_rewards(proven: List[bool], invalid: List[bool], times: List[float]):
     rewards = []
     for p, i, t in zip(proven, invalid, times):
@@ -324,7 +399,7 @@ def _compute_rewards(proven: List[bool], invalid: List[bool], times: List[float]
         elif p:
             rewards.append(log(10) - t / 5)  # proof complete
         else:
-            rewards.append(log(0.1)  - t / 5) # ongoing = small reward
+            rewards.append(log(0.1) - t / 5)  # ongoing = small reward
     return rewards
 
 
@@ -367,7 +442,8 @@ def train_gflownet(
                 continue
             action_trajectories = [[] for __ in start_states]  # list of actions for each proof
             state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
-            proof_state_history = [[node.root.proof_state] for node in start_states]  # list of proof states for each proof
+            proof_state_history = [[node.root.proof_state] for node in
+                                   start_states]  # list of proof states for each proof
             log_rewards = [log(0.1)] * len(start_states)
             times = [0] * len(start_states)
             done = [False] * len(start_states)
@@ -396,7 +472,14 @@ def train_gflownet(
                         for i, node in enumerate(start_states):
                             if node.done:
                                 continue
-                            proven, invalid, indices, goals, times_current = _env_expand(handlers[i], tactic_strings[current_idx], [currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx]))
+                            proven, invalid, indices, goals, times_current = _env_expand(handlers[i],
+                                                                                         tactic_strings[current_idx], [
+                                                                                             currents[
+                                                                                                 current_idx].proof_state_idx] * len(
+                                    tactic_strings[current_idx]))
+                            b_proven, b_invalid, b_indices, b_goals, b_times_current = _envs_expand([handlers[i]], [tactic_strings[current_idx]],
+                                         [[currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx])])
+                            assert b_proven[0] == proven and b_invalid[0] == invalid and b_goals[0] == goals
                             print("Proven, invalid etc", proven, invalid, indices, goals, times_current)
                             rewards = _compute_rewards(proven, invalid, times_current)
 
@@ -439,12 +522,14 @@ def train_gflownet(
                 for node in start_states:
                     node.move()
                 # Fill trajectories with the latest move, update rewards
-                prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) for node in start_states]
+                prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) for node in
+                           start_states]
                 for i, node in enumerate(start_states):
                     if done[i]: continue
                     state_trajectories[i].append(prompts[i])
                     # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
-                    action_trajectories[i].append(policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
+                    action_trajectories[i].append(
+                        policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
                     proof_state_history[i].append(node.root.proof_state)
                     if node.done and node.solved:
                         done[i] = True
@@ -491,26 +576,26 @@ def train_gflownet(
                 #             break
                 #     actions[j] = action
                 #     times[i] += tactic_times[tactic_id]
-                    # if has_error:
-                    #     log_rewards[i] = log(0.01)  # proof failed
-                    #     done[i] = True
-                    #     state_trajectories[i].append([policy.invalid_proof_token])
-                    #     j += 1
-                    #     continue
-                    # assert isinstance(response, LeanREPLNextProofState)
-                    # assert actions[j] is not None
-                    # goals = response.goals
-                    # action_trajectories[i] = actions[j]
-                    # proof_state_history[i] = "\n".join(goals)
+                # if has_error:
+                #     log_rewards[i] = log(0.01)  # proof failed
+                #     done[i] = True
+                #     state_trajectories[i].append([policy.invalid_proof_token])
+                #     j += 1
+                #     continue
+                # assert isinstance(response, LeanREPLNextProofState)
+                # assert actions[j] is not None
+                # goals = response.goals
+                # action_trajectories[i] = actions[j]
+                # proof_state_history[i] = "\n".join(goals)
 
-                    # if not goals:
-                    #     proof_length = len(
-                    #         actions[j])  # TODO: test some different reward formulations (e.g. computation time)
-                    #     log_rewards[i] = log(10) + log(1 - exp(-proof_length / 5))  # proof complete
-                    #     log_rewards[i] = log(10) + log(1 - exp(-times[i] / 5))
-                    #     done[i] = True
-                    #     state_trajectories[i].append([policy.successful_proof_token])
-                    # j += 1
+                # if not goals:
+                #     proof_length = len(
+                #         actions[j])  # TODO: test some different reward formulations (e.g. computation time)
+                #     log_rewards[i] = log(10) + log(1 - exp(-proof_length / 5))  # proof complete
+                #     log_rewards[i] = log(10) + log(1 - exp(-times[i] / 5))
+                #     done[i] = True
+                #     state_trajectories[i].append([policy.successful_proof_token])
+                # j += 1
 
                 idx += 1
 
@@ -532,7 +617,7 @@ def train_gflownet(
             trajs = [replay_buffer[i] for i in idxs_replay] + [precomputed_trajectories[i] for i in idxs_precomputed]
 
         # TODO: check this isn't always 0
-        #print(loss.grad) if loss is not None else None
+        # print(loss.grad) if loss is not None else None
 
         # 2. call the model on each trajectory
 
@@ -663,67 +748,72 @@ def main():
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--reload-checkpoint", action="store_true", default=False)
-    parser.add_argument("--num-tactics", type=int, default=10, help="Number of tactics to sample from the policy per state")
+    parser.add_argument("--num-tactics", type=int, default=10,
+                        help="Number of tactics to sample from the policy per state")
     parser.add_argument("--num-workers", type=int, default=0)
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
     start_theorems = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
-    start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"))
-    start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none, num_workers=args.num_workers)
+    with TemporaryDirectory() as tmp_dir:
+        start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
+                                         Path(tmp_dir))
+        start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
+                                  num_workers=args.num_workers, persistent_workers=False)
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
+        tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    n_layers = args.n_layers
-    d_model = args.d_model
+        n_layers = args.n_layers
+        d_model = args.d_model
 
-    eos_id = tokenizer.added_tokens_encoder["[EOS]"]
-    proofstate_id = tokenizer.added_tokens_encoder["[PROOFSTATE]"]
-    proofstep_id = tokenizer.added_tokens_encoder["[PROOFSTEP]"]
-    tactics_id = tokenizer.added_tokens_encoder["[TACTICS]"]
-    tactics_sep_id = tokenizer.added_tokens_encoder["[SEP]"]
-    # the policy sees a the list of proofstates we have transitioned to, separated by this token
-    proofstate_sep_id = tokenizer.added_tokens_encoder["[STATESEP]"]
+        eos_id = tokenizer.added_tokens_encoder["[EOS]"]
+        proofstate_id = tokenizer.added_tokens_encoder["[PROOFSTATE]"]
+        proofstep_id = tokenizer.added_tokens_encoder["[PROOFSTEP]"]
+        tactics_id = tokenizer.added_tokens_encoder["[TACTICS]"]
+        tactics_sep_id = tokenizer.added_tokens_encoder["[SEP]"]
+        # the policy sees a the list of proofstates we have transitioned to, separated by this token
+        proofstate_sep_id = tokenizer.added_tokens_encoder["[STATESEP]"]
 
-    # we need to be able to transition to unique leaf states, so end trajectories with the following tokens
-    successful_proof_token = tokenizer.added_tokens_encoder["[SUC]"]
-    incomplete_proof_token = tokenizer.added_tokens_encoder["[INC]"]
-    invalid_proof_token = tokenizer.added_tokens_encoder["[INV]"]
+        # we need to be able to transition to unique leaf states, so end trajectories with the following tokens
+        successful_proof_token = tokenizer.added_tokens_encoder["[SUC]"]
+        incomplete_proof_token = tokenizer.added_tokens_encoder["[INC]"]
+        invalid_proof_token = tokenizer.added_tokens_encoder["[INV]"]
 
-    tokenizer.pad_token = "[PAD]"
+        tokenizer.pad_token = "[PAD]"
 
-    checkpoint_path = Path(args.checkpoint_path)
+        checkpoint_path = Path(args.checkpoint_path)
 
-    # TODO: we should pretrain with the same state formulation as the GFlowNet implementation
-    if args.reload_checkpoint:
-        policy = MambaPolicy.from_file(checkpoint_path, True, tokenizer, device)
-    else:
-        config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
-        model = MambaLMHeadModelWrapper(config, device=device, is_gflownet=True)
-        policy = MambaPolicy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
-                             proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token,
-                             tokenizer, device, mamba_config=config)
-    policy.model.train()
-    #policy.model = torch.compile(policy.model)
-    torch.backends.cudnn.benchmark = True
+        # TODO: we should pretrain with the same state formulation as the GFlowNet implementation
+        if args.reload_checkpoint:
+            policy = MambaPolicy.from_file(checkpoint_path, True, tokenizer, device)
+        else:
+            config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
+            model = MambaLMHeadModelWrapper(config, device=device, is_gflownet=True)
+            policy = MambaPolicy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
+                                 proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token,
+                                 tokenizer, device, mamba_config=config)
+        policy.model.train()
+        # policy.model = torch.compile(policy.model)
+        torch.backends.cudnn.benchmark = True
 
-    # policy = Policy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, proofstate_sep_id,
-    #                 successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
+        # policy = Policy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, proofstate_sep_id,
+        #                 successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
 
-    gradient_accumulation_steps = args.gradient_accumulation_steps
-    batch_size = args.batch_size
-    rounds = args.rounds
+        gradient_accumulation_steps = args.gradient_accumulation_steps
+        batch_size = args.batch_size
+        rounds = args.rounds
 
-    optimizer = optim.AdamW(policy.model.get_non_z_params())
-    z_optimizer = optim.AdamW(policy.model.get_z_params())
+        optimizer = optim.AdamW(policy.model.get_non_z_params())
+        z_optimizer = optim.AdamW(policy.model.get_z_params())
 
-    # TODO: add lr scheduler?
-    precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
+        # TODO: add lr scheduler?
+        precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
 
-    train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer,
-                   z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device, max_retries=args.num_tactics)
+        train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer,
+                       z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device,
+                       max_retries=args.num_tactics)
 
 
 if __name__ == '__main__':

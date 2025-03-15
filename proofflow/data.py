@@ -2,8 +2,9 @@ from pathlib import Path
 import json
 from typing import Any, Sequence, Generator, Callable, Tuple, Optional
 from pydantic import BaseModel, model_validator
-from lean_repl_py import LeanREPLProofState, LeanREPLHandler
+from lean_repl_py import LeanREPLProofState, LeanREPLHandler, LeanREPLNextProofState
 from torch.utils.data import Dataset
+from uuid import uuid4
 import re
 
 LEAN_DOJO_PATH = Path("./leandojo_benchmark_4/random")
@@ -337,22 +338,26 @@ class TrainSampleDataset(TheoremDataset):
 
 
 class ProofStateDataset(TheoremDataset):
-    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path):
+    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path):
         super().__init__(json_path)
         self.handler_factory = handler_factory
         self.repo_path = repo_path
+        self.tmp_dir = tmp_dir
 
     def __len__(self):
         return len(self.thms)
 
-    def __getitem__(self, item) -> Optional[Tuple[LeanREPLHandler, LeanREPLProofState, Theorem]]:
+    def __getitem__(self, item) -> Optional[Tuple[Theorem, Path]]:
         thm = super().__getitem__(item)
         handler = self.handler_factory()
         try:
             proof_state = thm.to_proof_state(handler, repo_path=self.repo_path)
+            pickle_path = self.tmp_dir / f"{uuid4()}.pickle"
+            pickled, env = handler.pickle_proof_state(pickle_path, proof_state.proof_state)
+            assert isinstance(pickled, LeanREPLNextProofState)
         except UnknownMetaVariableError:
             return None
-        return handler, proof_state, thm
+        return thm,  pickle_path
 
 
 if __name__ == '__main__':
