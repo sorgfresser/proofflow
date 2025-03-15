@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import exp, log
 import time
 from collections import defaultdict
-from typing import Tuple, List, Union, Dict
+from typing import Tuple, List, Union, Dict, Any
 
 from torch import nn
 import torch
@@ -179,6 +179,7 @@ class Node:
     branch_is_done: bool = False
     previous_states: List[str] = None
     proof_state_idx: int = -1
+    metadata: Dict[str, Any] = None
 
     def __post_init__(self):
         self.children_for_tactics = {} if self.children_for_tactics is None else self.children_for_tactics
@@ -186,6 +187,7 @@ class Node:
         self.total_action_values = {} if self.total_action_values is None else self.total_action_values
         self.times = {} if self.times is None else self.times
         self.previous_states = [] if self.previous_states is None else self.previous_states
+        self.metadata = {} if self.metadata is None else self.metadata
 
     def expand(self, tactics: List[str], proof_states: List[str], times: List[float], values: List[float],
                indices: List[int]):
@@ -201,7 +203,7 @@ class Node:
             if tactic not in self.children_for_tactics:
                 self.children_for_tactics[tactic] = Node(proof_states[idx], parent=self, parent_tactic=tactic,
                                                          previous_states=self.previous_states + [self.proof_state],
-                                                         proof_state_idx=indices[idx])
+                                                         proof_state_idx=indices[idx], metadata=self.metadata)
                 self.times[tactic] = times[idx]
                 self.total_action_values[tactic] = values[idx]
                 self.visit_counts[tactic] = 1
@@ -264,7 +266,7 @@ class MCTS:
         if self.done:
             return
         best_tactic = self.root.select().best_action()
-        self.proof += best_tactic
+        self.proof += best_tactic + "\n"
         self.time += self.root.times[best_tactic]
         self.root = self.root.children_for_tactics[best_tactic]
         self.root.parent = None  # speedup memory release
@@ -293,7 +295,7 @@ def _get_start_states(batch_size_replay: int, start_theorems: List[Theorem], han
                 proof_state = thm.to_proof_state(handler, repo_path=repo_path)
             except UnknownMetaVariableError:
                 continue
-            nodes.append(Node(proof_state.goal, proof_state_idx=proof_state.proof_state))
+            nodes.append(Node(proof_state.goal, proof_state_idx=proof_state.proof_state, metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}))
             envs.append(proof_state)
     return envs, [MCTS(node) for node in nodes]
 
@@ -428,6 +430,7 @@ def train_gflownet(
                     print(f"Current previous states: {current.previous_states}")
                     print(f"Current tactic strings: {tactic_strings}")
                     print(f"Start states: {[state.root.proof_state for state in start_states]}")
+                    print(f"Start metadata: {[state.metadata for state in start_states]}")
                     strings = []
                     node = current
                     while node.parent is not None:
