@@ -358,7 +358,6 @@ def train_gflownet(
     for r in tqdm(range(rounds)):
         # Reset the handler to avoid memory leaks
         start_time = time.perf_counter()
-        handler = handler_factory()
         print(f"Handler creation time: {time.perf_counter() - start_time}")
 
         with torch.no_grad():
