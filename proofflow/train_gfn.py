@@ -357,14 +357,14 @@ def train_gflownet(
     samples_iter = iter(start_loader)
     for r in tqdm(range(rounds)):
         # Reset the handler to avoid memory leaks
-        start_time = time.perf_counter()
-        print(f"Handler creation time: {time.perf_counter() - start_time}")
-
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
             start_time = time.perf_counter()
             _, start_states, handlers = _get_start_states(samples_iter)
             print(f"Get start states time: {time.perf_counter() - start_time}")
+            # If the whole batch was invalid, quite unlikely, but possible
+            if not start_states:
+                continue
             action_trajectories = [[] for __ in start_states]  # list of actions for each proof
             state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
             proof_state_history = [[node.root.proof_state] for node in start_states]  # list of proof states for each proof
