@@ -470,33 +470,27 @@ def train_gflownet(
                         tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
                                                                        temperature=1)
                         next_tactic_time += time.perf_counter() - tactic_start_time
+                        current_handlers = [handlers[node_idx] for node_idx in range(len(start_states)) if not start_states[node_idx].done]
+                        proven, invalid, indices, goals, times_current = _envs_expand(current_handlers, tactic_strings,
+                                                  [[current.proof_state_idx] * len(tactic_strings[current_idx]) for current_idx, current in enumerate(currents)],)
                         current_idx = 0
                         print("Tactic strings", tactic_strings)
+                        print("Proven, invalid etc", proven, invalid, indices, goals, times_current)
                         for i, node in enumerate(start_states):
                             if node.done:
                                 continue
-                            proven, invalid, indices, goals, times_current = _env_expand(handlers[i],
-                                                                                         tactic_strings[current_idx], [
-                                                                                             currents[
-                                                                                                 current_idx].proof_state_idx] * len(
-                                    tactic_strings[current_idx]))
-                            b_proven, b_invalid, b_indices, b_goals, b_times_current = _envs_expand([handlers[i]], [tactic_strings[current_idx]],
-                                         [[currents[current_idx].proof_state_idx] * len(tactic_strings[current_idx])])
-                            assert b_proven[0] == proven and b_invalid[0] == invalid and b_goals[0] == goals
-                            print("Proven, invalid etc", proven, invalid, indices, goals, times_current)
-                            rewards = _compute_rewards(proven, invalid, times_current)
-
+                            rewards = _compute_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx])
                             # Only passes on valid tactics to expand, we might want to change this
                             tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
-                            goals = [g for g, p in zip(goals, invalid) if not p]
-                            times_current = [t for t, p in zip(times_current, invalid) if not p]
-                            indices = [index for index, p in zip(indices, invalid) if not p]
+                            goals_node = [g for g, p in zip(goals[current_idx], invalid) if not p]
+                            times_current_node = [t for t, p in zip(times_current[current_idx], invalid) if not p]
+                            indices_node = [index for index, p in zip(indices[current_idx], invalid) if not p]
                             rewards = [r for r, p in zip(rewards, invalid) if not p]
-                            currents[current_idx].expand(tactics, goals, times_current, rewards, indices)
-                            if any(proven):
+                            currents[current_idx].expand(tactics, goals_node, times_current_node, rewards, indices_node)
+                            if any(proven[current_idx]):
                                 node.done = True
                                 node.solved = True
-                                node.last_tactic = tactic_strings[current_idx][proven.index(True)]
+                                node.last_tactic = tactic_strings[current_idx][proven[current_idx].index(True)]
                             # Edge case, if we only have invalid tactics, there is no way to continue
                             elif node.root.branch_is_done:
                                 node.done = True
