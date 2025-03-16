@@ -5,7 +5,6 @@ from math import exp, log
 import time
 from collections import defaultdict
 from typing import Tuple, List, Union, Dict, Any, Iterator, Optional
-
 from torch import nn
 import torch
 from torch_scatter import scatter
@@ -284,23 +283,16 @@ class MCTS:
         return node
 
 
-def _get_start_states(start_loader: Iterator) -> Tuple[
+async def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], LeanREPLAsyncHandler]) -> Tuple[
     List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]:
-    async def _gather_proof_states(futures):
-        return await asyncio.gather(*futures)
-
-    start_time = time.perf_counter()
     batch = next(start_loader)
-    print(f"Time to obtain batch: {time.perf_counter() - start_time}")
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
-    start_time = time.perf_counter()
-    handlers = [LeanREPLAsyncHandler(Path("./leanproject")) for elem in paths]
+    handlers = [handler_factory() for _ in paths]
     # Start all REPLs
     proof_state_futures = [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
     # Gather
-    proof_states = asyncio.run(_gather_proof_states(proof_state_futures))
+    proof_states = await asyncio.gather(*proof_state_futures)
     proof_states = [proof_state for proof_state, env in proof_states]
-    print(f"Time to unpickle batch: {time.perf_counter() - start_time}")
     # Unlink them all, not needed anymore
     for path in paths:
         path.unlink()
@@ -363,6 +355,7 @@ async def _process_single_env(handler: LeanREPLAsyncHandler, tactics: List[str],
             goals.append(response.goals[0])  # only need one goal, it has all information
         indices.append(response.proof_state)
 
+
 async def _process_all_envs(handlers: List[LeanREPLAsyncHandler], tactics: List[List[str]],
                             proof_state_indices: List[List[int]]):
     proven = [[] for _ in handlers]
@@ -386,7 +379,9 @@ def _envs_expand(
 ):
     """Sends one tactic at a time per handler"""
     assert len(handlers) == len(tactics) == len(proof_state_indices)
-    proven, invalid, indices, goals, times = asyncio.run(_process_all_envs(handlers, tactics, proof_state_indices))
+    loop = asyncio.get_event_loop()
+    assert not loop.is_closed()
+    proven, invalid, indices, goals, times = loop.run_until_complete(_process_all_envs(handlers, tactics, proof_state_indices))
     return proven, invalid, indices, goals, times
 
 
@@ -402,10 +397,50 @@ def _compute_rewards(proven: List[bool], invalid: List[bool], times: List[float]
     return rewards
 
 
+class BackgroundDataLoader:
+    """
+    Wraps an existing PyTorch DataLoader in a background thread
+    that prefetches batches and places them into a queue.
+    """
+
+    def __init__(self, dataloader: DataLoader, handler_factory: Callable[[], LeanREPLAsyncHandler],
+                 max_prefetch: int = 2):
+        self.dataloader_iter = iter(dataloader)
+        self.queue: asyncio.Queue[Tuple[List[MCTS], List[LeanREPLAsyncHandler]]] = asyncio.Queue(maxsize=max_prefetch)
+        self.stop_flag = False
+        self.handler_factory = handler_factory
+
+    async def _run_async(self):
+        """The async producer coroutine that fetches data and puts it into the queue."""
+        while not self.stop_flag:
+            try:
+                _, start_states, handlers = await _get_start_states(self.dataloader_iter, self.handler_factory)
+            except StopIteration:
+                raise RuntimeError("Should not happen")
+            await self.queue.put((start_states, handlers))
+
+    async def start_background(self):
+        """Start the background task that fetches data."""
+        self.task = asyncio.create_task(self._run_async())
+
+    async def get_next_batch(self):
+        """Async method to get a batch (waits if queue is empty)."""
+        return await self.queue.get()
+
+    async def stop(self):
+        """Stop the loader."""
+        self.stop_flag = True
+        # Empty queue to avoid deadlock (because of putting)
+        while not self.queue.empty():
+            await self.queue.get()
+        await self.task
+
+
 def train_gflownet(
         policy: Policy,
         start_loader: DataLoader,
         precomputed_trajectories: List[Tuple[List[List[int]], List[List[int]]]],
+        handler_factory: Callable[[], LeanREPLAsyncHandler],
         # these are the human-written trajectories
         repo_path: Path,
         optimizer: optim.Optimizer,
@@ -429,13 +464,20 @@ def train_gflownet(
     replay_end, replay_saturated = 0, False
 
     tb_loss_agg = back_loss_agg = 0
-    samples_iter = iter(start_loader)
+
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    bg_loader = BackgroundDataLoader(start_loader, handler_factory)
+    loop.run_until_complete(bg_loader.start_background())
+
     for r in tqdm(range(rounds)):
         # Reset the handler to avoid memory leaks
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
             start_time = time.perf_counter()
-            _, start_states, handlers = _get_start_states(samples_iter)
+            start_states, handlers = loop.run_until_complete(bg_loader.get_next_batch())
             print(f"Get start states time: {time.perf_counter() - start_time}")
             # If the whole batch was invalid, quite unlikely, but possible
             if not start_states:
@@ -712,6 +754,8 @@ def train_gflownet(
             print(tb_loss_agg, back_loss_agg)
             tb_loss_agg = back_loss_agg = 0
             print("Mean reward:", log_rewards_tensor.exp().mean())
+    loop.run_until_complete(bg_loader.stop())
+    loop.close()
 
 
 def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTrainedTokenizerFast) -> List[
@@ -753,6 +797,7 @@ def main():
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
+    async_handler_factory = lambda: LeanREPLAsyncHandler(Path("./leanproject"))
     start_theorems = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
     with TemporaryDirectory() as tmp_dir:
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
@@ -810,8 +855,8 @@ def main():
         # TODO: add lr scheduler?
         precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
 
-        train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer,
-                       z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device,
+        train_gflownet(policy, start_loader, precomputed_trajectories, async_handler_factory, Path("./mathlib4"),
+                       optimizer, z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device,
                        max_retries=args.num_tactics, search_time=args.search_time)
 
 
