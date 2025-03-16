@@ -676,20 +676,19 @@ def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTr
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
 
-def get_eval_data(theorems: List[Theorem], handler_factory: Callable[[], LeanREPLHandler],
-                  repo_path: Path, tmp_dir: Path) -> List[Tuple[Theorem, Path]]:
-    out = []
-    for thm in theorems:
-        handler = handler_factory()
-        try:
-            proof_state = thm.to_proof_state(handler, repo_path=repo_path)
-            pickle_path = tmp_dir / f"{uuid4()}.pickle"
-            pickled, _env = handler.pickle_proof_state(pickle_path, proof_state.proof_state)
-            assert isinstance(pickled, LeanREPLNextProofState)
-        except UnknownMetaVariableError:
-            return None
-        out.append((thm, pickle_path))
-    return out
+
+def get_eval_data(eval_samples: ProofStateDataset, eval_theorems: int, num_workers: int) -> List[Tuple[Theorem, Path]]:
+    samples = []
+    batch_size = 1
+    data_loader = DataLoader(eval_samples, batch_size=batch_size, collate_fn=collate_skip_none, shuffle=False,
+                             num_workers=num_workers)
+    data_iter = iter(data_loader)
+    while len(samples) < eval_theorems:
+        batch = next(data_iter)
+        if not batch:
+            continue
+        samples.append(batch[0])
+    return samples
 
 
 def main():
@@ -716,14 +715,14 @@ def main():
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
     start_theorems_train = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
-    start_theorems_val = list(get_start_theorems(LEAN_DOJO_PATH / "val.json"))
 
     with TemporaryDirectory() as tmp_dir:
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
                                          Path(tmp_dir))
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
-
+        eval_states = ProofStateDataset(LEAN_DOJO_PATH / "val.json", handler_factory, Path("./mathlib4"), Path(tmp_dir))
+        eval_data = get_eval_data(eval_states, args.eval_theorems, args.num_workers)
         tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
