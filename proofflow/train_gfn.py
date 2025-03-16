@@ -257,7 +257,9 @@ async def _process_single_env(handler: LeanREPLAsyncHandler, tactics: List[str],
         await handler.send_tactic(tactic, proof_state_idx)
         response, _ = await handler.receive_json()
         times.append(time.perf_counter() - curr_time)
-        if "message" in response and response["message"].startswith("Lean error"):
+        has_error = "message" in response and response["message"].startswith("Lean error")
+        has_error |= "messages" in response and any(msg.severity == "error" for msg in response["messages"])
+        if has_error:
             invalid.append(True)
             proven.append(False)
             indices.append(None)
