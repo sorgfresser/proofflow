@@ -327,6 +327,7 @@ def sample_mcts_trajectories(
     action_trajectories = [[] for __ in start_states]  # list of actions for each proof
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
     done = [False] * len(start_states)
+    log_rewards = [0] * len(start_states)
 
     idx = 0
     while not all(node.done for node in start_states) and idx < max_len:
@@ -410,8 +411,6 @@ def sample_mcts_trajectories(
         # Fill trajectories with the latest move, update rewards
         prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) for node in
                     start_states]
-        
-        log_rewards = []
 
         for i, node in enumerate(start_states):
             if done[i]: continue
@@ -419,8 +418,7 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            rewards = _compute_log_rewards([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1)
-            log_rewards.append(rewards[0])
+            log_rewards[i] = _compute_log_rewards([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1)[0]
             if node.done:
                 end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
                 state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
@@ -554,7 +552,8 @@ def train_gflownet(
     bg_loader = BackgroundDataLoader(start_loader, handler_factory)
     loop.run_until_complete(bg_loader.start_background())
 
-    samples_iter = iter(start_loader)
+    print("Training")
+
     training_bar = trange(rounds)
     for r in training_bar:
 
@@ -745,6 +744,7 @@ def main():
     async_handler_factory = lambda: LeanREPLAsyncHandler(Path("./leanproject"))
 
     with TemporaryDirectory() as tmp_dir:
+        print("Getting data")
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
                                          Path(tmp_dir))
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
@@ -807,11 +807,15 @@ def main():
                 "gradient_accumulation_steps": gradient_accumulation_steps}
         #wandb.init(project="proofflow", config=config)
         train_gflownet(policy, start_loader, precomputed_trajectories, async_handler_factory, optimizer, z_optimizer,
-                       gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_data,
+                       gradient_accumulation_steps, batch_size, 0, rounds, eval_steps, eval_data,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        max_retries=args.num_tactics, search_time=args.search_time)
         #wandb.finish(exit_code=0)
 
 
 if __name__ == '__main__':
+
+    import warnings
+    warnings.filterwarnings("ignore", message="^.*using the `__call__` method is faster than.*$")
+
     main()
