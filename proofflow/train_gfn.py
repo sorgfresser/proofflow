@@ -655,21 +655,20 @@ def train_gflownet(
             #wandb.log(metrics, step=r)
             #wandb.log_model(checkpoint_path, name=f"model-round-{r}")
 
-def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTrainedTokenizerFast, policy: Policy) -> List[Tuple[List[List[int]], List[List[int]], int]]:
-
+def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTrainedTokenizerFast, policy: Policy) -> List[Tuple[List[List[int]], List[List[int]], float]]:
     precomputed_trajectories = []
     for thm in tqdm(start_theorems):
-        gfn_actions = []
-        gfn_states = []
-        proof_states = []
+        gfn_actions: List[List[int]] = []
+        gfn_states: List[List[int]] = []
+        proof_states: List[str] = []
         for tactic in thm.traced_tactics:
             gfn_actions.append(tokenizer.encode(tactic.tactic))
             gfn_states.append(policy._build_prompt(tactic.state_before, None, proof_states))
             proof_states.append(tactic.state_before)
-        gfn_states.append(policy._build_prompt([policy.successful_proof_token], None, proof_states))
+        gfn_states.append(policy._build_prompt(tokenizer.decode([policy.successful_proof_token]), None, proof_states))
         complete = thm.traced_tactics[-1].state_after == "no goals"
-        log_reward = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
-        precomputed_trajectories.append(gfn_states, gfn_actions, log_reward)
+        log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
+        precomputed_trajectories.append((gfn_states, gfn_actions, log_reward))
     return precomputed_trajectories
 
 
@@ -766,7 +765,6 @@ def main():
         batch_size = args.batch_size
         rounds = args.rounds
         eval_steps = args.eval_steps
-        eval_data = get_eval_data(start_theorems_val[:args.eval_theorems], handler_factory, Path("./mathlib4"), Path(tmp_dir))
         eval_repeats = args.eval_repeats
 
         optimizer = optim.AdamW(policy.model.get_non_z_params())
