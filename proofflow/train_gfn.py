@@ -1,4 +1,5 @@
 import gc
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import exp, log
 from uuid import uuid4
