@@ -467,8 +467,8 @@ def train_gflownet(
                         end_states = [current.proof_state for current in currents]
                         histories = [current.previous_states for current in currents]
                         tactic_start_time = time.perf_counter()
-                        tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,
-                                                                       temperature=1)
+                        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                            tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,temperature=1)
                         next_tactic_time += time.perf_counter() - tactic_start_time
                         current_handlers = [handlers[node_idx] for node_idx in range(len(start_states)) if not start_states[node_idx].done]
                         proven, invalid, indices, goals, times_current = _envs_expand(current_handlers, tactic_strings,
@@ -625,7 +625,7 @@ def train_gflownet(
         log_z_inputs = z_padded_prompts.input_ids.to(device)
         log_z_attention_mask = z_padded_prompts.attention_mask.to(device)
 
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
             log_z = policy.model.log_z(log_z_inputs, log_z_attention_mask)  # some duplicate computation happening here
 
         traj_lens = torch.tensor([len(actions) for _, actions, _ in trajs], device=device)
@@ -645,7 +645,7 @@ def train_gflownet(
         fwd_padded = policy.tokenizer.pad({"input_ids": fwd_inputs}, padding_side="right", return_tensors="pt")
         bck_padded = policy.tokenizer.pad({"input_ids": bck_inputs}, padding_side="right", return_tensors="pt")
 
-        with torch.autocast(device_type=device, dtype=torch.float16):
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
             fwd_outputs = policy.model(fwd_padded.input_ids.to(device))
             bck_outputs = policy.model.p_b(bck_padded.input_ids.to(device))
             # Fill log probs for tactic tokens
