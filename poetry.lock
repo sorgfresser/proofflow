@@ -330,14 +330,14 @@ i18n = ["Babel (>=2.7)"]
 
 [[package]]
 name = "lean-repl-py"
-version = "0.1.12"
+version = "0.1.13"
 description = "A Python application to interact with the Lean REPL."
 optional = false
 python-versions = "<4.0,>=3.9"
 groups = ["main"]
 files = [
-    {file = "lean_repl_py-0.1.12-py3-none-any.whl", hash = "sha256:f59327c89c943f9af6ca57f605afea524656d7b6b71fdb749f28c90f17cde026"},
-    {file = "lean_repl_py-0.1.12.tar.gz", hash = "sha256:dbac28d37acdec0fe408cede1f06d4b9d8d1c6c58cb1d85655db43a2e7a20d3c"},
+    {file = "lean_repl_py-0.1.13-py3-none-any.whl", hash = "sha256:46c0aa181ba3d29681b0dc719cfd9bd93fe90a2e3c22386ca31dca0fa08c34c3"},
+    {file = "lean_repl_py-0.1.13.tar.gz", hash = "sha256:41edbe23d20a7370ef439d73b2970d8ece6bd6af70d7c371c3ff16bb45da0577"},
 ]
 
 [package.dependencies]
