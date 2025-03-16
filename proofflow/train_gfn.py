@@ -224,8 +224,8 @@ class MCTS:
         return node
 
 
-async def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], LeanREPLAsyncHandler], repeats: int = 1) -> Tuple[
-    List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]:
+async def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], LeanREPLAsyncHandler], repeats: int = 1) -> \
+        Tuple[List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]:
     batch = next(start_loader)
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
     # Will be thm[0] k times, then thm 1 k times etc.
@@ -523,7 +523,7 @@ def train_gflownet(
         batch_size_sampled: int,
         rounds: int,
         eval_steps: int,
-        eval_data: List[Tuple[Theorem, Path]],
+        eval_loader: DataLoader,
         eval_repeats: int,
         device: str,
         checkpoint_path: Path,
@@ -551,6 +551,9 @@ def train_gflownet(
     asyncio.set_event_loop(loop)
     bg_loader = BackgroundDataLoader(start_loader, handler_factory)
     loop.run_until_complete(bg_loader.start_background())
+
+    bg_eval_loader = BackgroundDataLoader(eval_loader, handler_factory)
+    loop.run_until_complete(bg_eval_loader.start_background())
 
     print("Training")
 
@@ -658,9 +661,8 @@ def train_gflownet(
         if r % eval_steps == 0:
 
             with torch.no_grad():
-                _, _eval_start_states, eval_handlers = loop.run_until_complete(  # TODO: maybe we want to put this in a dataloader too
-                    _get_start_states(iter([eval_data]), handler_factory, repeats=eval_repeats)
-                )
+
+                start_states, handlers = # TODO: get states here from bg_eval_loader
 
                 state_trajectories, action_trajectories, gen_log_rewards = sample_mcts_trajectories(
                     policy, start_states, eval_handlers, search_time, device, max_retries=max_retries
@@ -670,6 +672,7 @@ def train_gflownet(
                 for i in range(len(action_trajectories) // eval_repeats):
                     trajs = action_trajectories[i*eval_repeats:(i+1)*eval_repeats]
                     mean_similarity += get_similarity(trajs)
+
             gen_log_rewards_tensor = torch.tensor(gen_log_rewards, device=device)
             metrics = {
                 "sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
@@ -696,26 +699,11 @@ def train_gflownet(
             #wandb.log_model(checkpoint_path, name=f"model-round-{r}")
 
     loop.run_until_complete(bg_loader.stop())
+    loop.run_until_complete(bg_eval_loader.stop())
     loop.close()
 
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
-
-
-def get_eval_data(eval_samples: ProofStateDataset, eval_theorems: int, num_workers: int) -> List[Tuple[Theorem, Path]]:
-    samples = []
-    batch_size = 1
-    data_loader = DataLoader(eval_samples, batch_size=batch_size, collate_fn=collate_skip_none, shuffle=False,
-                             num_workers=num_workers)
-    p_bar = tqdm(data_loader, total=eval_theorems, leave=False)
-    for batch in p_bar:
-        if not batch:
-            continue
-        samples.append(batch[0])
-        p_bar.update(1)
-        if len(samples) >= eval_theorems:
-            break
-    return samples
 
 
 def main():
@@ -750,7 +738,9 @@ def main():
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
         eval_states = ProofStateDataset(LEAN_DOJO_PATH / "proof_flow_theorems.json", handler_factory, Path("./mathlib4"), Path(tmp_dir))
-        eval_data = get_eval_data(eval_states, args.eval_theorems, args.num_workers)
+        eval_states.thms = eval_states.thms[args.eval_theorems]
+        eval_loader = DataLoader(eval_states, batch_size=1, collate_fn=collate_skip_none, shuffle=False,
+                                             num_workers=args.num_workers)
         tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -801,13 +791,11 @@ def main():
 
         precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy)
 
-        eval_data: List[Tuple[Theorem, Path]]
-
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                 "gradient_accumulation_steps": gradient_accumulation_steps}
         #wandb.init(project="proofflow", config=config)
         train_gflownet(policy, start_loader, precomputed_trajectories, async_handler_factory, optimizer, z_optimizer,
-                       gradient_accumulation_steps, batch_size, 0, rounds, eval_steps, eval_data,
+                       gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_loader,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        max_retries=args.num_tactics, search_time=args.search_time)
         #wandb.finish(exit_code=0)

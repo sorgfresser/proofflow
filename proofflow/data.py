@@ -357,7 +357,7 @@ class ProofStateDataset(TheoremDataset):
             assert isinstance(pickled, LeanREPLNextProofState)
         except UnknownMetaVariableError:
             return None
-        return thm,  pickle_path
+        return thm, pickle_path
 
 
 if __name__ == '__main__':
