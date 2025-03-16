@@ -10,7 +10,7 @@ import torch
 from torch_scatter import scatter
 from lean_repl_py import LeanREPLHandler, LeanREPLNextProofState, LeanREPLProofState, LeanREPLAsyncHandler
 from proofflow.model.ffm import FFM
-from proofflow.data import parse_json, LEAN_DOJO_PATH, Theorem, ProofStateDataset
+from proofflow.data import parse_json, LEAN_DOJO_PATH, Theorem, ProofStateDataset, TheoremDataset
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from torch.utils.data import DataLoader
@@ -246,8 +246,9 @@ def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], Lean
     proof_states = [proof_state for proof_state, env in proof_states]
     print(f"Time to unpickle batch: {time.perf_counter() - start_time}")
     # Unlink them all, not needed anymore
+    assert all(path.exists() for path in paths)
     for path in paths:
-        path.unlink()
+        path.unlink(missing_ok=True) # missing ok because of repeats
     assert all(len(proof_state.goals) == 1 for proof_state in proof_states)
     nodes = [Node(proof_state.goals[0], proof_state_idx=proof_state.proof_state,
                   metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}) for proof_state, thm in
