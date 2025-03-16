@@ -19,7 +19,7 @@ def _process_single_env(handler: LeanREPLHandler, tactics: List[str], proof_stat
         handler.send_tactic(tactic, proof_state_idx)
         response, _ = handler.receive_json()
         has_error = "message" in response and response["message"].startswith("Lean error")
-        has_error |= "messages" in response and any(msg.severity == "error" for msg in response["messages"])
+        has_error = has_error or "messages" in response and any(msg.severity == "error" for msg in response["messages"])
         if has_error:
             invalid.append(True)
             proven.append(False)
