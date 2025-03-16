@@ -333,7 +333,7 @@ def _envs_expand(
     return proven, invalid, indices, goals, times
 
 
-def _compute_rewards(proven: List[bool], invalid: List[bool], times: List[float], lengths: List[int]) -> List[float]:
+def _compute_log_rewards(proven: List[bool], invalid: List[bool], times: List[float], lengths: List[int]) -> List[float]:
     rewards = []
     for p, i, _t, l in zip(proven, invalid, times, lengths):
         if i:
@@ -397,7 +397,7 @@ def sample_mcts_trajectories(
                     if node.done:
                         continue
 
-                    rewards = _compute_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(node.previous_states))
+                    rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states))
                     # Only passes on valid tactics to expand, we might want to change this
 
                     tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
@@ -451,7 +451,8 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            log_rewards.append(0)
+            rewards = _compute_log_rewards([node.solved], [not node.solved and node.done], [node.time], [node.step_count])
+            log_rewards.append(rewards[0])
             if node.done:
                 end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
                 state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
@@ -667,7 +668,7 @@ def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTr
             proof_states.append(tactic.state_before)
         gfn_states.append(policy._build_prompt([policy.successful_proof_token], None, proof_states))
         complete = thm.traced_tactics[-1].state_after == "no goals"
-        log_reward = _compute_rewards([complete], [not complete], [0], [len(gfn_actions)])[0]
+        log_reward = _compute_log_rewards([complete], [not complete], [0], [len(gfn_actions)])[0]
         precomputed_trajectories.append(gfn_states, gfn_actions, log_reward)
     return precomputed_trajectories
 
@@ -677,7 +678,6 @@ def collate_skip_none(batch):
 
 def get_eval_data(theorems: List[Theorem], handler_factory: Callable[[], LeanREPLHandler],
                   repo_path: Path, tmp_dir: Path) -> List[Tuple[Theorem, Path]]:
-
     out = []
     for thm in theorems:
         handler = handler_factory()
