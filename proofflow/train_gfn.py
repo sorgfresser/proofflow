@@ -1,6 +1,7 @@
 import gc
 from dataclasses import dataclass
 from math import exp, log
+from uuid import uuid4
 import time
 from typing import Tuple, List, Union, Dict, Any, Iterator, Optional
 import warnings
@@ -465,6 +466,23 @@ def sample_mcts_trajectories(
     return state_trajectories, action_trajectories, log_rewards
 
 
+def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
+    # here we compute the mean number of length N subsequences in pairs of trajectories
+    result = 0
+
+    traj_dicts = []
+    for action_traj in action_trajs:
+        traj_dict = {}
+        for sub_idx in range(len(action_traj)-N+1):
+            sub_seq = action_traj[sub_idx:sub_idx+N]
+            traj_dict[sub_seq] = traj_dict.get(sub_seq, 0) + 1
+        traj_dicts.append(traj_dict)
+
+    for a_0 in traj_dicts:
+        for a_1 in traj_dicts:
+            result += [a_1.get(k, 0) * v for k, v in a_0.items()]
+    return result / len(action_trajs)**2
+
 def train_gflownet(
         policy: Policy,
         start_loader: DataLoader,
@@ -478,7 +496,7 @@ def train_gflownet(
         batch_size_sampled: int,
         rounds: int,
         eval_steps: int,
-        eval_theorems: List[Theorem],
+        eval_data: List[Tuple[Theorem, Path]],
         eval_repeats: int,
         device: str,
         checkpoint_path: Path,
@@ -548,11 +566,8 @@ def train_gflownet(
         log_p_f = torch.zeros(traj_lens.sum(), device=device)
         log_p_b = torch.zeros(traj_lens.sum(), device=device)
 
-        log_rewards = []
-
         idx = 0
         # for each action, compute the sum of token log probs with prev state (p_f) and next state (p_b)
-
         prev_states = [state for states, __, __ in trajs for state in states[:-1]]
         next_states = [state for states, __, __ in trajs for state in states[1:]]
         actions = [action for __, actions, _ in trajs for action in actions]
@@ -609,29 +624,19 @@ def train_gflownet(
 
             with torch.no_grad():
 
-                num_theorems = 0
-                envs = []
-                start_states = []
+                _, eval_start_states, eval_handlers = _get_start_states(iter([eval_data]))
 
-                for i, thm in enumerate(eval_theorems):
-                    try:
-                        proof_state = thm.to_proof_state(handler, repo_path=repo_path)  # TODO: update
-                        num_theorems += 1
-                        for i in eval_repeats:  # we sample each trajectory multiple times to compare similarity
-                            envs.append(proof_state)
-                            start_states.append(proof_state.goal)
-                    except UnknownMetaVariableError:
-                        warnings.warn("One of the eval theorems failed.")
+                eval_start_states = [j.copy() for i in eval_start_states for j in [i]*eval_repeats]
+                eval_handlers = [j.copy() for i in eval_handlers for j in [i]*eval_repeats]
 
-                state_trajectories, action_trajectories, gen_log_rewards = sample_trajectories_mcts(
-                    policy, start_states, handler, max_retries=max_retries
+                state_trajectories, action_trajectories, gen_log_rewards = sample_mcts_trajectories(
+                    policy, start_states, eval_handlers, search_time, device, max_retries=max_retries
                 )
 
                 mean_similarity = 0
-                for i in range(num_theorems):
+                for i in range(len(action_trajectories) // eval_repeats):
                     trajs = action_trajectories[i*eval_repeats:(i+1)*eval_repeats]
-                    num_unique = len(set(trajs))  # TODO: we should use a better similarity metric
-                    mean_similarity += num_unique / num_theorems
+                    mean_similarity += get_similarity(trajs)
 
             metrics = {
                 "sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
@@ -669,6 +674,23 @@ def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTr
 
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
+
+# TODO: @Simon - is this ok?
+def get_eval_data(theorems: List[Theorem], handler_factory: Callable[[], LeanREPLHandler],
+                  repo_path: Path, tmp_dir: Path) -> List[Tuple[Theorem, Path]]:
+
+    out = []
+    for thm in theorems:
+        handler = handler_factory()
+        try:
+            proof_state = thm.to_proof_state(handler, repo_path=repo_path)
+            pickle_path = tmp_dir / f"{uuid4()}.pickle"
+            pickled, _env = handler.pickle_proof_state(pickle_path, proof_state.proof_state)
+            assert isinstance(pickled, LeanREPLNextProofState)
+        except UnknownMetaVariableError:
+            return None
+        out.append((thm, pickle_path))
+    return out
 
 
 def main():
@@ -744,7 +766,7 @@ def main():
         batch_size = args.batch_size
         rounds = args.rounds
         eval_steps = args.eval_steps
-        eval_theorems = start_theorems[:args.eval_theorems]
+        eval_data = get_eval_data(start_theorems[:args.eval_theorems])
         eval_repeats = args.eval_repeats
 
         optimizer = optim.AdamW(policy.model.get_non_z_params())
@@ -752,11 +774,13 @@ def main():
 
         precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer, policy)
 
+        eval_data: List[Tuple[Theorem, Path]]
+
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                 "gradient_accumulation_steps": gradient_accumulation_steps}
         #wandb.init(project="proofflow", config=config)
         train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer, z_optimizer,
-                       gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_theorems,
+                       gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_data,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        max_retries=args.num_tactics, search_time=args.search_time)
         #wandb.finish(exit_code=0)

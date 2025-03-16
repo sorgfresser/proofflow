@@ -106,7 +106,7 @@ class Policy:
                         tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                         previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
                         temperature: float = 0.0, max_new_tokens: int = 20) -> \
-                            Tuple[Union[List[str], str], Union[List[List[int]], List[int]], Union[List[str], str]]:
+                            Tuple[Union[List[str], str], Union[List[List[int]], List[int]], Union[List[List[int]], List[int]]]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
         Additionally, return the tokenization and prompts generated.
 
@@ -117,57 +117,12 @@ class Policy:
         :param max_new_tokens: The maximum number of new tokens to generate for the tactics
         :return: The subsequent tactics, the tokenization of the tactics, the generated prompts
         """
-        output_single = False
-        if isinstance(proof_states, str):
-            output_single = True
-            proof_states = [proof_states]
-            assert not tactics_so_far or isinstance(tactics_so_far[0], str)
-            tactics_so_far = [tactics_so_far] if tactics_so_far is not None else None
-            assert not previous_proof_states or isinstance(previous_proof_states[0], str)
-            previous_proof_states = [previous_proof_states] if previous_proof_states is not None else None
-
-        if not tactics_so_far:
-            tactics_so_far = [None] * len(proof_states)
-        if not previous_proof_states:
-            previous_proof_states = [None] * len(proof_states)
-
-        assert len(proof_states) == len(tactics_so_far) == len(previous_proof_states)
-
-        prompts = [self._build_prompt(proof_state, preceding_tactics, preceding_states)
-                    for proof_state, preceding_tactics, preceding_states in
-                    zip(proof_states, tactics_so_far, previous_proof_states)]
-        prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_tensors="pt")
-        prompt_tensor = prompt_results.input_ids.to(self.device)
-        tactics = []
-        idx = 0
-        eos = torch.zeros(prompt_tensor.shape[0], dtype=torch.bool, device=self.device)
-        while not eos.all() and idx < max_new_tokens:
-            with torch.autocast(device_type=self.device, dtype=torch.float16):
-                # Only take the last token for sampling next tokens, classical language model
-                logits = self.model(prompt_tensor)[:, -1, ...].squeeze(1)
-            if temperature > 0.0:
-                softmaxed = self.softmax(logits / temperature)
-                tokens = torch.multinomial(softmaxed, 1).squeeze(1)
-            else:
-                tokens = logits.argmax(dim=1)
-            eos |= tokens == self.eos_token
-            prompt_tensor = torch.cat([prompt_tensor, tokens[:, None]], dim=1)
-            tactics.append(tokens)
-            idx += 1
-        tactics = torch.stack(tactics, dim=1)
-        tactics = tactics[:, :-1] # Remove the last token, which is the eos token
-        tactics = tactics.tolist()
-        result_ids: List[List[int]] = []
-        for tactic in tactics:
-            result = []
-            for token in tactic:
-                if token == self.eos_token:
-                    break
-                result.append(token)
-            result_ids.append(result)
-        if output_single:
-            return self.tokenizer.decode(result_ids[0]), result_ids[0], prompts[0]
-        return self.tokenizer.batch_decode(result_ids), result_ids, prompts
+        tactics, tactic_ids, prompts = self.next_tactics_int(proof_states, 1, tactics_so_far, previous_proof_states, temperature,
+                                             max_new_tokens)
+        assert len(tactics) == len(tactic_ids)
+        if len(tactics) == 1:
+            return tactics[0], tactic_ids[0], prompts
+        return tactics, tactic_ids, prompts
 
     def next_tactics(self, proof_states: Union[List[str], str], k: int,
                      tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
@@ -230,20 +185,23 @@ class Policy:
         tactics = []
         idx = 0
         eos = torch.zeros(prompt_tensor.shape[0], dtype=torch.bool, device=self.device)
+        last_index = (prompt_results.attention_mask.sum(1) - 1).repeat(k, 1).view(-1)
         while not eos.all() and idx < max_new_tokens:
             with torch.autocast(device_type=self.device, dtype=torch.float16):
                 # Only take the last token for sampling next tokens, classical language model
-                logits = self.model(prompt_tensor)[:, -1, ...].squeeze(1)
+                logits = self.model(prompt_tensor)[torch.arange(prompt_tensor.shape[0]), last_index, :]
             if temperature > 0.0:
                 softmaxed = self.softmax(logits / temperature)
                 tokens = torch.multinomial(softmaxed, 1).squeeze(1)
             else:  # if we take argmax, presumably we may as well just call next_tactic
-                warnings.warn("Taking argmax in next_tactics_int, this is equivalent to calling next_tactic")
+                if k > 1:
+                    warnings.warn("Taking argmax in next_tactics_int, this is equivalent to calling next_tactic")
                 tokens = logits.argmax(dim=1)
             eos |= tokens == self.eos_token
             prompt_tensor = torch.cat([prompt_tensor, tokens[:, None]], dim=1)
             tactics.append(tokens)
             idx += 1
+            last_index += 1
         tactics = torch.stack(tactics, dim=1)
         tactics = tactics[:, :-1] # Remove the last token, which is the eos token
         tactics = tactics.reshape(len(proof_states), k, tactics.shape[1])
