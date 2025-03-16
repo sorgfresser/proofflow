@@ -1,6 +1,6 @@
 from pathlib import Path
 import json
-from typing import Any, Sequence, Generator, Callable, Tuple, Optional, Callable
+from typing import Any, Sequence, Generator, Callable, Tuple, Optional
 from pydantic import BaseModel, model_validator
 from lean_repl_py import LeanREPLProofState, LeanREPLHandler, LeanREPLNextProofState
 from torch.utils.data import Dataset
