@@ -1,10 +1,8 @@
 import gc
-from collections.abc import Callable
 from dataclasses import dataclass
 from math import exp, log
-from uuid import uuid4
 import time
-from typing import Tuple, List, Union, Dict, Any, Iterator, Optional
+from typing import Tuple, List, Union, Dict, Any, Iterator, Optional, Callable
 
 import numpy as np
 from torch import nn
@@ -12,7 +10,7 @@ import torch
 from torch_scatter import scatter
 from lean_repl_py import LeanREPLHandler, LeanREPLNextProofState, LeanREPLProofState, LeanREPLAsyncHandler
 from proofflow.model.ffm import FFM
-from proofflow.data import parse_json, LEAN_DOJO_PATH, Theorem, UnknownMetaVariableError, ProofStateDataset
+from proofflow.data import parse_json, LEAN_DOJO_PATH, Theorem, ProofStateDataset
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from torch.utils.data import DataLoader
@@ -237,10 +235,10 @@ def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], Lean
     print(f"Time to obtain batch: {time.perf_counter() - start_time}")
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
     # Will be thm[0] k times, then thm 1 k times etc.
-    thms = [thm for thm in thms for repeat in range(repeats)]
-    paths = [path for path in paths for repeat in range(repeats)]
+    thms = [thm for thm in thms for _ in range(repeats)]
+    paths = [path for path in paths for _ in range(repeats)]
     start_time = time.perf_counter()
-    handlers = [handler_factory() for elem in paths]
+    handlers = [handler_factory() for _ in paths]
     # Start all REPLs
     proof_state_futures = [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
     # Gather
@@ -255,34 +253,6 @@ def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], Lean
                   metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}) for proof_state, thm in
              zip(proof_states, thms)]
     return proof_states, [MCTS(node) for node in nodes], handlers
-
-
-def _env_expand(handler: LeanREPLAsyncHandler, tactics: List[str], proof_state_indices: List[int]):
-    proven = []
-    invalid = []
-    indices = []
-    goals = []
-    times = []
-    for tactic, proof_state_idx in zip(tactics, proof_state_indices, strict=True):
-        curr_time = time.perf_counter()
-        asyncio.run(handler.send_tactic(tactic, proof_state_idx))
-        response, _ = asyncio.run(handler.receive_json())
-        times.append(time.perf_counter() - curr_time)
-        if "message" in response and response["message"].startswith("Lean error"):
-            invalid.append(True)
-            proven.append(False)
-            indices.append(None)
-            goals.append(None)
-            continue
-        assert isinstance(response, LeanREPLNextProofState)
-        proven.append(not response.goals)
-        invalid.append(False)
-        if not response.goals:
-            goals.append(None)
-        else:
-            goals.append(response.goals[0])  # only need one goal, it has all information
-        indices.append(response.proof_state)
-    return proven, invalid, indices, goals, times
 
 
 async def _process_single_env(handler: LeanREPLAsyncHandler, tactics: List[str], proof_state_indices: List[int],
@@ -400,7 +370,7 @@ def sample_mcts_trajectories(
                     if node.done:
                         continue
 
-                    rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states))
+                    rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
                     # Only passes on valid tactics to expand, we might want to change this
 
                     tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
@@ -454,7 +424,7 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            rewards = _compute_log_rewards([node.solved], [not node.solved and node.done], [node.time], node.step_count)
+            rewards = _compute_log_rewards([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1)
             log_rewards.append(rewards[0])
             if node.done:
                 end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
@@ -636,10 +606,10 @@ def train_gflownet(
                 for i in range(len(action_trajectories) // eval_repeats):
                     trajs = action_trajectories[i*eval_repeats:(i+1)*eval_repeats]
                     mean_similarity += get_similarity(trajs)
-
+            gen_log_rewards_tensor = torch.tensor(gen_log_rewards, device=device)
             metrics = {
                 "sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
-                "eval_mean_reward": gen_log_rewards.exp().mean().item(),
+                "eval_mean_reward": gen_log_rewards_tensor.exp().mean().item(),
                 "eval_similarity": mean_similarity,
                 "tb_loss": tb_loss_agg,
                 "back_loss": back_loss_agg
