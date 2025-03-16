@@ -28,8 +28,11 @@ class MambaLMHeadModelWrapper(MambaLMHeadModel):
         back_logits = self.back_head(hidden_states)
         return back_logits
 
-    def log_z(self, input_ids):
-        hidden_states = self.backbone(input_ids)[:, -1]
+    def log_z(self, input_ids, attention_mask):
+        hidden_states = self.backbone(input_ids)
+        # Get the last one that has attention one
+        last_indices = attention_mask.sum(1) - 1
+        hidden_states = hidden_states[torch.arange(hidden_states.shape[0]), last_indices]
         lm_logits = self.z_head(hidden_states)
         return lm_logits
 
