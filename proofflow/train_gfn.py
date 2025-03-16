@@ -5,7 +5,6 @@ from math import exp, log
 from uuid import uuid4
 import time
 from typing import Tuple, List, Union, Dict, Any, Iterator, Optional
-import warnings
 
 import numpy as np
 from torch import nn
@@ -359,8 +358,6 @@ def sample_mcts_trajectories(
 
     action_trajectories = [[] for __ in start_states]  # list of actions for each proof
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
-    proof_state_history = [[node.root.proof_state] for node in start_states]  # list of proof states for each proof
-    times = [0] * len(start_states)
     done = [False] * len(start_states)
 
     idx = 0
@@ -454,11 +451,13 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            log_rewards.append(0)  # TODO: @Simon not sure what the best way to extract the reward is here?
+            log_rewards.append(0)
             if node.done:
                 end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
                 state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
                 done[i] = True
+
+        idx += 1
 
     for i, t in enumerate(state_trajectories):
         if not start_states[i].done:
@@ -676,7 +675,6 @@ def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTr
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
 
-# TODO: @Simon - is this ok?
 def get_eval_data(theorems: List[Theorem], handler_factory: Callable[[], LeanREPLHandler],
                   repo_path: Path, tmp_dir: Path) -> List[Tuple[Theorem, Path]]:
 
