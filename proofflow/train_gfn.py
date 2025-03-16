@@ -15,7 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from torch.utils.data import DataLoader
 from proofflow.policy import Policy, MambaLMHeadModelWrapper, MambaPolicy
-from transformers import PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast, PreTrainedTokenizer
 import torch.optim as optim
 from math import sqrt
 from mamba_ssm.models.config_mamba import MambaConfig
@@ -457,10 +457,33 @@ def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
             result += [a_1.get(k, 0) * v for k, v in a_0.items()]
     return result / len(action_trajs)**2
 
+
+class PrecomputedTrajectoryDataset(TheoremDataset):
+    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy):
+        super().__init__(data_path)
+        self.tokenizer = tokenizer
+        self.policy = policy
+
+    def __getitem__(self, item: int) -> Tuple[List[List[int]], List[List[int]], float]:
+        thm = super().__getitem__(item)
+        gfn_actions: List[List[int]] = []
+        gfn_states: List[List[int]] = []
+        proof_states: List[str] = []
+        for tactic in thm.traced_tactics:
+            gfn_actions.append(self.tokenizer.encode(tactic.tactic))
+            gfn_states.append(self.policy._build_prompt(tactic.state_before, None, proof_states))
+            proof_states.append(tactic.state_before)
+        gfn_states.append(
+            self.policy._build_prompt(self.tokenizer.decode([self.policy.successful_proof_token]), None, proof_states))
+        complete = thm.traced_tactics[-1].state_after == "no goals"
+        log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
+        return gfn_states, gfn_actions, log_reward
+
+
 def train_gflownet(
         policy: Policy,
         start_loader: DataLoader,
-        precomputed_trajectories: List[Tuple[List[List[int]], List[List[int]]]],
+        precomputed_trajectories: PrecomputedTrajectoryDataset,
         # these are the human-written trajectories
         handler_factory: Callable[[], LeanREPLAsyncHandler],
         optimizer: optim.Optimizer,
@@ -623,23 +646,6 @@ def train_gflownet(
             #wandb.log(metrics, step=r)
             #wandb.log_model(checkpoint_path, name=f"model-round-{r}")
 
-def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTrainedTokenizerFast, policy: Policy) -> List[Tuple[List[List[int]], List[List[int]], float]]:
-    precomputed_trajectories = []
-    for thm in tqdm(start_theorems):
-        gfn_actions: List[List[int]] = []
-        gfn_states: List[List[int]] = []
-        proof_states: List[str] = []
-        for tactic in thm.traced_tactics:
-            gfn_actions.append(tokenizer.encode(tactic.tactic))
-            gfn_states.append(policy._build_prompt(tactic.state_before, None, proof_states))
-            proof_states.append(tactic.state_before)
-        gfn_states.append(policy._build_prompt(tokenizer.decode([policy.successful_proof_token]), None, proof_states))
-        complete = thm.traced_tactics[-1].state_after == "no goals"
-        log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
-        precomputed_trajectories.append((gfn_states, gfn_actions, log_reward))
-    return precomputed_trajectories
-
-
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
 
@@ -682,7 +688,6 @@ def main():
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
     async_factory = lambda: LeanREPLAsyncHandler(Path("./leanproject"))
-    start_theorems_train = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
 
     with TemporaryDirectory() as tmp_dir:
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
@@ -739,7 +744,7 @@ def main():
         optimizer = optim.AdamW(policy.model.get_non_z_params())
         z_optimizer = optim.AdamW(policy.model.get_z_params())
 
-        precomputed_trajectories = get_precomputed_trajectories(start_theorems_train, tokenizer, policy)
+        precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy)
 
         eval_data: List[Tuple[Theorem, Path]]
 
