@@ -259,6 +259,7 @@ async def _process_single_env(handler: LeanREPLAsyncHandler, tactics: List[str],
         times.append(time.perf_counter() - curr_time)
         has_error = "message" in response and response["message"].startswith("Lean error")
         has_error = has_error or "messages" in response and any(msg.severity == "error" for msg in response["messages"])
+        has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(msg.severity == "error" for msg in response.messages))
         if has_error:
             invalid.append(True)
             proven.append(False)
