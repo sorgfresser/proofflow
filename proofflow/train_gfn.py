@@ -227,7 +227,7 @@ class MCTS:
         return node
 
 
-def _get_start_states(start_loader: Iterator) -> Tuple[
+def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], LeanREPLAsyncHandler], repeats: int = 1) -> Tuple[
     List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]:
     async def _gather_proof_states(futures):
         return await asyncio.gather(*futures)
@@ -236,8 +236,11 @@ def _get_start_states(start_loader: Iterator) -> Tuple[
     batch = next(start_loader)
     print(f"Time to obtain batch: {time.perf_counter() - start_time}")
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
+    # Will be thm[0] k times, then thm 1 k times etc.
+    thms = [thm for thm in thms for repeat in range(repeats)]
+    paths = [path for path in paths for repeat in range(repeats)]
     start_time = time.perf_counter()
-    handlers = [LeanREPLAsyncHandler(Path("./leanproject")) for elem in paths]
+    handlers = [handler_factory() for elem in paths]
     # Start all REPLs
     proof_state_futures = [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
     # Gather
@@ -489,7 +492,7 @@ def train_gflownet(
         start_loader: DataLoader,
         precomputed_trajectories: List[Tuple[List[List[int]], List[List[int]]]],
         # these are the human-written trajectories
-        repo_path: Path,
+        handler_factory: Callable[[], LeanREPLAsyncHandler],
         optimizer: optim.Optimizer,
         z_optimizer: optim.Optimizer,
         gradient_accumulation_steps: int,
@@ -526,7 +529,7 @@ def train_gflownet(
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
 
-            _, start_states, handlers = _get_start_states(samples_iter)
+            _, start_states, handlers = _get_start_states(samples_iter, handler_factory)
 
             # If the whole batch was invalid, quite unlikely, but possible
             if not start_states:
@@ -624,12 +627,7 @@ def train_gflownet(
         if r % eval_steps == 0:
 
             with torch.no_grad():
-
-                _, eval_start_states, eval_handlers = _get_start_states(iter([eval_data]))
-
-                eval_start_states = [j.copy() for i in eval_start_states for j in [i]*eval_repeats]
-                eval_handlers = [j.copy() for i in eval_handlers for j in [i]*eval_repeats]
-
+                _, eval_start_states, eval_handlers = _get_start_states(iter([eval_data]), handler_factory, repeats=eval_repeats)
                 state_trajectories, action_trajectories, gen_log_rewards = sample_mcts_trajectories(
                     policy, start_states, eval_handlers, search_time, device, max_retries=max_retries
                 )
@@ -713,6 +711,7 @@ def main():
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
+    async_factory = lambda: LeanREPLAsyncHandler(Path("./leanproject"))
     start_theorems_train = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
 
     with TemporaryDirectory() as tmp_dir:
@@ -777,7 +776,7 @@ def main():
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                 "gradient_accumulation_steps": gradient_accumulation_steps}
         #wandb.init(project="proofflow", config=config)
-        train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer, z_optimizer,
+        train_gflownet(policy, start_loader, precomputed_trajectories, async_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_data,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        max_retries=args.num_tactics, search_time=args.search_time)
