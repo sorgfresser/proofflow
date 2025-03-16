@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from math import exp, log
 import time
 from typing import Tuple, List, Union, Dict, Any, Iterator, Optional, Callable
-
 import numpy as np
 from torch import nn
 import torch
@@ -225,26 +224,19 @@ class MCTS:
         return node
 
 
-def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], LeanREPLAsyncHandler], repeats: int = 1) -> Tuple[
+async def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], LeanREPLAsyncHandler], repeats: int = 1) -> Tuple[
     List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]:
-    async def _gather_proof_states(futures):
-        return await asyncio.gather(*futures)
-
-    start_time = time.perf_counter()
     batch = next(start_loader)
-    print(f"Time to obtain batch: {time.perf_counter() - start_time}")
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
     # Will be thm[0] k times, then thm 1 k times etc.
     thms = [thm for thm in thms for _ in range(repeats)]
     paths = [path for path in paths for _ in range(repeats)]
-    start_time = time.perf_counter()
     handlers = [handler_factory() for _ in paths]
     # Start all REPLs
     proof_state_futures = [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
     # Gather
-    proof_states = asyncio.run(_gather_proof_states(proof_state_futures))
+    proof_states = await asyncio.gather(*proof_state_futures)
     proof_states = [proof_state for proof_state, env in proof_states]
-    print(f"Time to unpickle batch: {time.perf_counter() - start_time}")
     # Unlink them all, not needed anymore
     assert all(path.exists() for path in paths)
     for path in paths:
@@ -303,7 +295,9 @@ def _envs_expand(
 ):
     """Sends one tactic at a time per handler"""
     assert len(handlers) == len(tactics) == len(proof_state_indices)
-    proven, invalid, indices, goals, times = asyncio.run(_process_all_envs(handlers, tactics, proof_state_indices))
+    loop = asyncio.get_event_loop()
+    assert not loop.is_closed()
+    proven, invalid, indices, goals, times = loop.run_until_complete(_process_all_envs(handlers, tactics, proof_state_indices))
     return proven, invalid, indices, goals, times
 
 
@@ -480,6 +474,43 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
         log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
         return gfn_states, gfn_actions, log_reward
 
+class BackgroundDataLoader:
+    """
+    Wraps an existing PyTorch DataLoader in a background thread
+    that prefetches batches and places them into a queue.
+    """
+
+    def __init__(self, dataloader: DataLoader, handler_factory: Callable[[], LeanREPLAsyncHandler],
+                 max_prefetch: int = 2):
+        self.dataloader_iter = iter(dataloader)
+        self.queue: asyncio.Queue[Tuple[List[MCTS], List[LeanREPLAsyncHandler]]] = asyncio.Queue(maxsize=max_prefetch)
+        self.stop_flag = False
+        self.handler_factory = handler_factory
+
+    async def _run_async(self):
+        """The async producer coroutine that fetches data and puts it into the queue."""
+        while not self.stop_flag:
+            try:
+                _, start_states, handlers = await _get_start_states(self.dataloader_iter, self.handler_factory)
+            except StopIteration:
+                raise RuntimeError("Should not happen")
+            await self.queue.put((start_states, handlers))
+
+    async def start_background(self):
+        """Start the background task that fetches data."""
+        self.task = asyncio.create_task(self._run_async())
+
+    async def get_next_batch(self):
+        """Async method to get a batch (waits if queue is empty)."""
+        return await self.queue.get()
+
+    async def stop(self):
+        """Stop the loader."""
+        self.stop_flag = True
+        # Empty queue to avoid deadlock (because of putting)
+        while not self.queue.empty():
+            await self.queue.get()
+        await self.task
 
 def train_gflownet(
         policy: Policy,
@@ -516,6 +547,13 @@ def train_gflownet(
     tb_loss_agg = back_loss_agg = 0
     metrics_list = []
 
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    bg_loader = BackgroundDataLoader(start_loader, handler_factory)
+    loop.run_until_complete(bg_loader.start_background())
+
     samples_iter = iter(start_loader)
     training_bar = trange(rounds)
     for r in training_bar:
@@ -523,7 +561,7 @@ def train_gflownet(
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
 
-            _, start_states, handlers = _get_start_states(samples_iter, handler_factory)
+            start_states, handlers = loop.run_until_complete(bg_loader.get_next_batch())
 
             # If the whole batch was invalid, quite unlikely, but possible
             if not start_states:
@@ -621,7 +659,10 @@ def train_gflownet(
         if r % eval_steps == 0:
 
             with torch.no_grad():
-                _, eval_start_states, eval_handlers = _get_start_states(iter([eval_data]), handler_factory, repeats=eval_repeats)
+                _, _eval_start_states, eval_handlers = loop.run_until_complete(  # TODO: maybe we want to put this in a dataloader too
+                    _get_start_states(iter([eval_data]), handler_factory, repeats=eval_repeats)
+                )
+
                 state_trajectories, action_trajectories, gen_log_rewards = sample_mcts_trajectories(
                     policy, start_states, eval_handlers, search_time, device, max_retries=max_retries
                 )
@@ -636,7 +677,15 @@ def train_gflownet(
                 "eval_mean_reward": gen_log_rewards_tensor.exp().mean().item(),
                 "eval_similarity": mean_similarity,
                 "tb_loss": tb_loss_agg,
-                "back_loss": back_loss_agg
+                "back_loss": back_loss_agg,
+                "mean_action_p_f": log_p_f.mean().item(),
+                "mean_action_p_b": log_p_b.mean().item()
+                # Would be interesting to track this last metric for different values of state_skip
+                # in _build_prompt if p_b goes down as state_skip increases, that might imply it
+                # makes the graph less like a tree, which is interesting because in the case where
+                # state_skip -> infinity (i.e. the gfn state is the proof state, which should be the
+                # default for normal RL), we can say that it does not look like a tree, and
+                # therefore GFNs are useful and, additionally, that backward policies matter a lot.
             }
             metrics_list.append(metrics)
 
@@ -647,6 +696,9 @@ def train_gflownet(
             #wandb.log(metrics, step=r)
             #wandb.log_model(checkpoint_path, name=f"model-round-{r}")
 
+    loop.run_until_complete(bg_loader.stop())
+    loop.close()
+
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
 
@@ -656,12 +708,14 @@ def get_eval_data(eval_samples: ProofStateDataset, eval_theorems: int, num_worke
     batch_size = 1
     data_loader = DataLoader(eval_samples, batch_size=batch_size, collate_fn=collate_skip_none, shuffle=False,
                              num_workers=num_workers)
-    data_iter = iter(data_loader)
-    while len(samples) < eval_theorems:
-        batch = next(data_iter)
+    p_bar = tqdm(data_loader, total=eval_theorems, leave=False)
+    for batch in p_bar:
         if not batch:
             continue
         samples.append(batch[0])
+        p_bar.update(1)
+        if len(samples) >= eval_theorems:
+            break
     return samples
 
 
@@ -677,25 +731,25 @@ def main():
     parser.add_argument("--load-checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--save-checkpoint-path", type=str, default="checkpoint.pt")
     parser.add_argument("--save-metrics-path", type=str, default="metrics.npy")
-    parser.add_argument("--reload-checkpoint", action="store_true", default=False)
+    parser.add_argument("--reload-checkpoint", action="store_true", default=True)
     parser.add_argument("--num-tactics", type=int, default=10,
                         help="Number of tactics to sample from the policy per state")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--search-time", type=int, default=100, help="Number of MCTS nodes to explore before selecting a tactic")
     parser.add_argument("--eval-steps", type=int, default=1)
-    parser.add_argument("--eval-theorems", type=int, default=100)
+    parser.add_argument("--eval-theorems", type=int, default=20)
     parser.add_argument("--eval-repeats", type=int, default=5)
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
-    async_factory = lambda: LeanREPLAsyncHandler(Path("./leanproject"))
+    async_handler_factory = lambda: LeanREPLAsyncHandler(Path("./leanproject"))
 
     with TemporaryDirectory() as tmp_dir:
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
                                          Path(tmp_dir))
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
-        eval_states = ProofStateDataset(LEAN_DOJO_PATH / "val.json", handler_factory, Path("./mathlib4"), Path(tmp_dir))
+        eval_states = ProofStateDataset(LEAN_DOJO_PATH / "proof_flow_theorems.json", handler_factory, Path("./mathlib4"), Path(tmp_dir))
         eval_data = get_eval_data(eval_states, args.eval_theorems, args.num_workers)
         tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
@@ -752,7 +806,7 @@ def main():
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                 "gradient_accumulation_steps": gradient_accumulation_steps}
         #wandb.init(project="proofflow", config=config)
-        train_gflownet(policy, start_loader, precomputed_trajectories, async_factory, optimizer, z_optimizer,
+        train_gflownet(policy, start_loader, precomputed_trajectories, async_handler_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_data,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        max_retries=args.num_tactics, search_time=args.search_time)
