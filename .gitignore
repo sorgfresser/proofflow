@@ -1,6 +1,6 @@
 leandojo_benchmark_4
 leandojo_benchmark_4.tar.gz
-model_small.pt
+model.pt
 leanproject/.lake/build
 checkpoint.pt
 proofflow/__pycache__/*

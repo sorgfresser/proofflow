@@ -715,7 +715,9 @@ def main():
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
-    start_theorems = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
+    start_theorems_train = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
+    start_theorems_val = list(get_start_theorems(LEAN_DOJO_PATH / "val.json"))
+
     with TemporaryDirectory() as tmp_dir:
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
                                          Path(tmp_dir))
@@ -765,13 +767,13 @@ def main():
         batch_size = args.batch_size
         rounds = args.rounds
         eval_steps = args.eval_steps
-        eval_data = get_eval_data(start_theorems[:args.eval_theorems], handler_factory, Path("./mathlib4"), Path(tmp_dir))
+        eval_data = get_eval_data(start_theorems_val[:args.eval_theorems], handler_factory, Path("./mathlib4"), Path(tmp_dir))
         eval_repeats = args.eval_repeats
 
         optimizer = optim.AdamW(policy.model.get_non_z_params())
         z_optimizer = optim.AdamW(policy.model.get_z_params())
 
-        precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer, policy)
+        precomputed_trajectories = get_precomputed_trajectories(start_theorems_train, tokenizer, policy)
 
         eval_data: List[Tuple[Theorem, Path]]
 
