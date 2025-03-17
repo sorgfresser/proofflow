@@ -785,7 +785,7 @@ def main():
                                          Path(tmp_dir))
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
-        eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir), repeats=args.eval_repeats, sample_count=args.eval_theorems)
+        eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir), repeats=args.eval_repeats, sample_count=args.eval_theorems, filter_lake=False)
         start_loader = DataLoader(eval_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
         eval_loader = DataLoader(eval_states, batch_size=args.eval_batch_size,
