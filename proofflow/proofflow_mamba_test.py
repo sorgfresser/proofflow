@@ -9,15 +9,18 @@ from pathlib import Path
 from lean_repl_py import LeanREPLHandler, LeanREPLNextProofState
 from tempfile import TemporaryDirectory
 from typing import List, Optional
+import time
+
 
 def _process_single_env(handler: LeanREPLHandler, tactics: List[str], proof_state_indices: List[int],
                               proven: List[bool], invalid: List[bool], indices: List[Optional[int]],
                               goals: List[Optional[List[str]]], times: List[float]):
     assert len(proven) == len(invalid) == len(indices) == len(goals) == 0
     for tactic, proof_state_idx in zip(tactics, proof_state_indices, strict=True):
-
+        curr_time = time.perf_counter()
         handler.send_tactic(tactic, proof_state_idx)
         response, _ = handler.receive_json()
+        times.append(time.perf_counter() - curr_time)
         has_error = "message" in response and response["message"].startswith("Lean error")
         has_error = has_error or "messages" in response and any(msg.severity == "error" for msg in response["messages"])
         has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(msg.severity == "error" for msg in response.messages))
@@ -84,7 +87,7 @@ tokenizer.pad_token = "[PAD]"
 with TemporaryDirectory() as tmpdir:
     handler_fac = lambda: LeanREPLHandler(Path("./leanproject"))
 
-    ds = ProofStateDataset(Path("proof_flow_theorems.json"), handler_fac, Path("./mathlib4"), Path(tmpdir))
+    ds = ProofStateDataset(Path("proof_flow_theorems.json"), handler_fac, Path("./mathlib4"), Path(tmpdir), filter_lake=False)
     policy = MambaPolicy.from_file(Path("./modelnewesttokenizer.pt"), True, tokenizer, device)
     policy.model.eval()
     # policy.model = torch.compile(policy.model)
@@ -146,18 +149,18 @@ with TemporaryDirectory() as tmpdir:
                 rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
                 # Only passes on valid tactics to expand, we might want to change this
 
-                tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
-                goals_node = [g for g, p in zip(goals[current_idx], invalid) if not p]
-                times_current_node = [t for t, p in zip(times_current[current_idx], invalid) if not p]
-                indices_node = [index for index, p in zip(indices[current_idx], invalid) if not p]
-                rewards = [r for r, p in zip(rewards, invalid) if not p]
+                tactics = [t for t, p in zip(tactic_strings[current_idx], invalid[current_idx]) if not p]
+                goals_node = [g for g, p in zip(goals[current_idx], invalid[current_idx]) if not p]
+                times_current_node = [t for t, p in zip(times_current[current_idx], invalid[current_idx]) if not p]
+                indices_node = [index for index, p in zip(indices[current_idx], invalid[current_idx]) if not p]
+                rewards = [r for r, p in zip(rewards, invalid[current_idx]) if not p]
 
                 currents[current_idx].expand(tactics, goals_node, times_current_node, rewards, indices_node)
                 if any(proven[current_idx]):
-                    print("Proof: ", proven[current_idx])
                     node.done = True
                     node.solved = True
                     node.proof += tactic_strings[current_idx][proven[current_idx].index(True)]
+                    print("Proof: ", node.proof, "for theorem: ", node.root.metadata)
                     node.last_tactic = tactic_strings[current_idx][proven[current_idx].index(True)]
                 # Edge case, if we only have invalid tactics, there is no way to continue
                 elif node.root.branch_is_done:

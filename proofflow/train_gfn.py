@@ -142,12 +142,18 @@ class Node:
         for idx, tactic in enumerate(tactics):
             # Duplicates in tactics are possible
             if tactic not in self.children_for_tactics:
+                # Avoid cycles
+                if proof_states[idx] in self.previous_states:
+                    continue
                 self.children_for_tactics[tactic] = Node(proof_states[idx], parent=self, parent_tactic=tactic,
                                                          previous_states=self.previous_states + [self.proof_state],
                                                          proof_state_idx=indices[idx], metadata=self.metadata)
                 self.times[tactic] = times[idx]
                 self.total_action_values[tactic] = values[idx]
                 self.visit_counts[tactic] = 1
+        if not self.children_for_tactics:
+            self.backup_branch_done()
+            return
         self.backup()
 
     def backup_branch_done(self):
@@ -215,13 +221,15 @@ class MCTS:
     def move(self):
         if self.done:
             return
-        best_tactic = self.root.select().best_action()
+        best_tactic = self.root.best_action()
         self.proof += best_tactic + "\n"
         self.time += self.root.times[best_tactic]
         self.root = self.root.children_for_tactics[best_tactic]
         self.root.parent = None  # speedup memory release
         self.step_count += 1
         self.last_tactic = best_tactic
+        if self.root.branch_is_done:
+            self.done = True
         gc.collect()
 
     def select(self) -> Node:
@@ -418,10 +426,10 @@ def sample_mcts_trajectories(
             print(f"Current metadata: {current.metadata}")
             print(f"Node metadata: {node.root.metadata}")
             strings = []
-            node = current
-            while node.parent is not None:
-                strings.append(node.parent_tactic)
-                node = node.parent
+            failed_node = current
+            while failed_node.parent is not None:
+                strings.append(failed_node.parent_tactic)
+                failed_node = failed_node.parent
             current_proof = "\n".join(reversed(strings))
             print(f"Current proof: {current_proof}")
             raise e
@@ -449,7 +457,7 @@ def sample_mcts_trajectories(
 
     for i, t in enumerate(state_trajectories):
         if not start_states[i].done:
-            t[0].append(t[0][-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
+            t.append(t[-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
     assert all(len(state) == len(action) + 1 for state, action in zip(state_trajectories, action_trajectories, strict=True))
 
     close_futures = [handler.close() for handler in handlers]
