@@ -192,6 +192,15 @@ class Node:
             return self
         return self.children_for_tactics[self.best_action_policy()].select()
 
+    def subtree_count(self):
+        return 1 + sum(child.subtree_count() for child in self.children_for_tactics.values())
+
+    def valid_count(self):
+        if self.branch_is_done:
+            return 0
+        return 1 + sum(child.valid_count() for child in self.children_for_tactics.values())
+
+
 
 class MCTS:
     def __init__(self, root: Node):
@@ -328,14 +337,16 @@ def sample_mcts_trajectories(
         device: str,
         max_len: int = 10,
         max_retries: int = 5
-) -> Tuple[List[List[List[int]]], List[List[List[int]]], list[float]]:
-
+) -> Tuple[List[List[List[int]]], List[List[List[int]]], list[float], int, float]:
     action_trajectories = [[] for __ in start_states]  # list of actions for each proof
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
     done = [False] * len(start_states)
     log_rewards = [0] * len(start_states)
 
     idx = 0
+    nodes_proven = 0
+    expanded_node_count = 0
+    valid_child_count = 0
     while not all(node.done for node in start_states) and idx < max_len:
 
         try:
@@ -380,12 +391,15 @@ def sample_mcts_trajectories(
                     times_current_node = [t for t, p in zip(times_current[current_idx], invalid) if not p]
                     indices_node = [index for index, p in zip(indices[current_idx], invalid) if not p]
                     rewards = [r for r, p in zip(rewards, invalid) if not p]
-
+                    expanded_node_count += 1
+                    if tactics:
+                        valid_child_count += 1
                     currents[current_idx].expand(tactics, goals_node, times_current_node, rewards, indices_node)
                     if any(proven[current_idx]):
                         node.done = True
                         node.solved = True
                         node.last_tactic = tactic_strings[current_idx][proven[current_idx].index(True)]
+                        nodes_proven += 1
                     # Edge case, if we only have invalid tactics, there is no way to continue
                     elif node.root.branch_is_done:
                         node.done = True
@@ -437,7 +451,7 @@ def sample_mcts_trajectories(
         if not start_states[i].done:
             t[0].append(t[0][-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
 
-    return state_trajectories, action_trajectories, log_rewards
+    return state_trajectories, action_trajectories, log_rewards, nodes_proven, float(valid_child_count) / expanded_node_count
 
 
 def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
@@ -529,7 +543,7 @@ def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Cal
             for batch_idx in range(len(eval_loader)):
                 batch = loop.run_until_complete(bg_eval_loader.get_next_batch())
                 eval_states, eval_handlers = batch
-                state_trajectories, action_trajectories, gen_log_rewards = sample_mcts_trajectories(
+                state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
                     policy, eval_states, eval_handlers, search_time, device, max_retries=max_retries
                 )
                 mean_similarity = 0
@@ -544,7 +558,9 @@ def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Cal
 
     metrics = {
         "validation/mean_reward": sum(rewards) / len(rewards),
-        "validation/similarity": float(sum(similarities)) / len(similarities)
+        "validation/similarity": float(sum(similarities)) / len(similarities),
+        "validation/nodes_proven": nodes_proven,
+        "validation/proof_state_ratio": proof_state_ratio
     }
     loop.run_until_complete(bg_eval_loader.stop())
     return metrics
@@ -612,7 +628,7 @@ def train_gflownet(
             if not start_states:
                 continue
 
-            state_trajectories, action_trajectories, gen_log_rewards = sample_mcts_trajectories(
+            state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ration = sample_mcts_trajectories(
                 policy, start_states, handlers, search_time, device, max_retries=max_retries
             )
 
