@@ -262,7 +262,7 @@ async def _get_start_states(start_loader: Iterator, handler_factory: Callable[[]
 
 async def _process_single_env(handler: LeanREPLAsyncHandler, tactics: List[str], proof_state_indices: List[int],
                               proven: List[bool], invalid: List[bool], indices: List[Optional[int]],
-                              goals: List[Optional[List[str]]], times: List[float]):
+                              goals: List[Optional[str]], times: List[float]):
     assert len(proven) == len(invalid) == len(indices) == len(goals) == 0
     for tactic, proof_state_idx in zip(tactics, proof_state_indices, strict=True):
         curr_time = time.perf_counter()
@@ -540,7 +540,6 @@ class BackgroundDataLoader:
 
 def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLAsyncHandler],
              device: str, eval_repeats: int, search_time: int, max_retries: int) -> dict[str, float]:
-    return {}
     bg_eval_loader = BackgroundDataLoader(eval_loader, handler_factory)
     loop.run_until_complete(bg_eval_loader.start_background())
     similarities = []
