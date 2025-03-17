@@ -308,6 +308,7 @@ class TheoremDataset(Dataset):
         self.thms = list(parse_json(json_path))
         if sample_count > 0:
             self.thms = self.thms[:sample_count]
+        print("Initial length:", len(self.thms))
         # Filter to only theorems with traced tactics
         self.thms = list(filter(lambda thm: thm.traced_tactics, self.thms))
         # Filter to not include .lake files
@@ -350,16 +351,18 @@ class TrainSampleDataset(TheoremDataset):
 
 
 class ProofStateDataset(TheoremDataset):
-    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path, sample_count: int = -1):
+    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path, repeats: int = 1, sample_count: int = -1):
         super().__init__(json_path, sample_count)
         self.handler_factory = handler_factory
         self.repo_path = repo_path
         self.tmp_dir = tmp_dir
+        self.repeats = repeats
 
     def __len__(self):
-        return len(self.thms)
+        return len(self.thms) * self.repeats
 
     def __getitem__(self, item) -> Optional[Tuple[Theorem, Path]]:
+        item = item // self.repeats
         thm = super().__getitem__(item)
         handler = self.handler_factory()
         try:

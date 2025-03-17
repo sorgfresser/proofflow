@@ -21,7 +21,7 @@ from mamba_ssm.models.config_mamba import MambaConfig
 from tqdm import trange, tqdm
 from argparse import ArgumentParser
 import asyncio
-#import wandb
+import wandb
 
 
 class ModelBlock(nn.Module):
@@ -451,9 +451,14 @@ def sample_mcts_trajectories(
         if not start_states[i].done:
             t[0].append(t[0][-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
 
+    close_futures = [handler.close() for handler in handlers]
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(asyncio.gather(*close_futures))
     return state_trajectories, action_trajectories, log_rewards, nodes_proven, float(valid_child_count) / expanded_node_count
 
 
+
+# TODO: use levenshtein distance
 def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
     # here we compute the mean number of length N subsequences in pairs of trajectories
     result = 0
@@ -534,16 +539,18 @@ class BackgroundDataLoader:
 
 def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLAsyncHandler],
              device: str, eval_repeats: int, search_time: int, max_retries: int) -> dict[str, float]:
+    return {}
     bg_eval_loader = BackgroundDataLoader(eval_loader, handler_factory)
     loop.run_until_complete(bg_eval_loader.start_background())
     similarities = []
     rewards = []
     with torch.no_grad():
         with tqdm(total=len(eval_loader)) as pbar:
-            for batch_idx in range(len(eval_loader)):
+            for _batch_idx in range(len(eval_loader)):
                 batch = loop.run_until_complete(bg_eval_loader.get_next_batch())
                 eval_states, eval_handlers = batch
-                state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
+                _state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
+
                     policy, eval_states, eval_handlers, search_time, device, max_retries=max_retries
                 )
                 mean_similarity = 0
@@ -599,7 +606,7 @@ def train_gflownet(
     replay_buffer = [None] * replay_buffer_len
     replay_end, replay_saturated = 0, False
 
-    tb_loss_agg = back_loss_agg = 0
+    tb_loss_acc = back_loss_acc = 0
     metrics_list = []
 
     loop = asyncio.get_event_loop()
@@ -667,7 +674,7 @@ def train_gflownet(
             # for each action, compute the sum of token log probs with prev state (p_f) and next state (p_b)
             prev_states = [state for states, __, __ in trajs for state in states[:-1]]
             next_states = [state for states, __, __ in trajs for state in states[1:]]
-            actions = [action for __, actions, _ in trajs for action in actions]
+            actions = [action for __, actions, __ in trajs for action in actions]
             fwd_inputs = [state + action for state, action in zip(prev_states, actions, strict=True)]
             bck_inputs = [state + action for state, action in zip(next_states, actions)]
 
@@ -701,17 +708,18 @@ def train_gflownet(
 
             loss = tb_loss + back_loss
 
-            tb_loss_agg += tb_loss
-            back_loss_agg += back_loss
+            tb_loss_acc += tb_loss.item()
+            back_loss_acc += back_loss.item()
 
             training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
             training_bar.refresh()
         action_lengths = sum(map(len, actions), 0) / len(actions)
         scaler.scale(loss).backward()
-        training_metrics = {"train/tb_loss": tb_loss, "train/back_loss": back_loss,
-                   "train/sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
-                   "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
-                   "train/action_lengths": action_lengths}
+        training_metrics = {"train/tb_loss": tb_loss.item(), "train/back_loss": back_loss.item(),
+                            "train/sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
+                            "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
+                            "train.mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
+                            "train/action_lengths": action_lengths}
         wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
@@ -723,6 +731,12 @@ def train_gflownet(
             scaler.update()
             optimizer.zero_grad()
             z_optimizer.zero_grad()
+
+            training_metrics.update({"train/accumulated_tb_loss": tb_loss_acc,
+                                     "train/accumulated_back_loss": back_loss_acc})
+            tb_loss_acc = back_loss_acc = 0
+
+        wandb.log(training_metrics, step=r)
         
         if r % eval_steps == 0:
             eval_metrics = evaluate(policy, loop, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries)
@@ -766,12 +780,12 @@ def main():
     async_handler_factory = lambda: LeanREPLAsyncHandler(Path("./leanproject"))
 
     with TemporaryDirectory() as tmp_dir:
-        print("Getting data")
+        print("Getting data...")
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
                                          Path(tmp_dir))
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
-        eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir)) # , sample_count=args.eval_theorems
+        eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir), repeats=args.eval_repeats, sample_count=args.eval_theorems)
         start_loader = DataLoader(eval_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
         eval_loader = DataLoader(eval_states, batch_size=args.eval_batch_size,
