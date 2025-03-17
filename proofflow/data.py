@@ -312,12 +312,22 @@ class TheoremDataset(Dataset):
         self.thms = list(filter(lambda thm: thm.traced_tactics, self.thms))
         # Filter to not include .lake files
         self.thms = list(filter(lambda thm: not ".lake" in thm.file_path, self.thms))
+        # Filter short
+        print("Filtering from samples:", len(self.thms))
+        self._filter_length(5_000)
+        print("Filtering to samples:", len(self.thms))
+
 
     def __len__(self):
         return len(self.thms)
 
     def __getitem__(self, item) -> Theorem:
         return self.thms[item]
+
+    def _filter_length(self, length: int) -> None:
+        self.thms = [thm for thm in self.thms if all(len(sample.proof_state) + len(sample.tactic) + sum(
+            len(tac) for tac in sample.tactics_so_far) + sum(
+            len(state) for state in sample.proof_states_so_far) < length for sample in thm.to_samples())]
 
 
 class TrainSampleDataset(TheoremDataset):

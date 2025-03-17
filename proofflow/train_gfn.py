@@ -577,6 +577,8 @@ def train_gflownet(
     optimizer.zero_grad()
     z_optimizer.zero_grad()
 
+    scaler = torch.GradScaler()
+
     replay_buffer = [None] * replay_buffer_len
     replay_end, replay_saturated = 0, False
 
@@ -597,7 +599,13 @@ def train_gflownet(
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
 
-            start_states, handlers = loop.run_until_complete(bg_loader.get_next_batch())
+            batch = loop.run_until_complete(bg_loader.get_next_batch())
+            if batch is None:
+                loop.run_until_complete(bg_loader.stop())
+                bg_loader = BackgroundDataLoader(start_loader, handler_factory)
+                loop.run_until_complete(bg_loader.start_background())
+                batch = loop.run_until_complete(bg_loader.get_next_batch())
+            start_states, handlers = batch
 
             # If the whole batch was invalid, quite unlikely, but possible
             if not start_states:
@@ -632,19 +640,19 @@ def train_gflownet(
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             log_z = policy.model.log_z(log_z_inputs, log_z_attention_mask)  # some duplicate computation happening here
 
-        traj_lens = torch.tensor([len(actions) for __, actions, __ in trajs], device=device)
+            traj_lens = torch.tensor([len(actions) for __, actions, __ in trajs], device=device)
 
-        # stack each trajectory so we can use torch_scatter
-        log_p_f = torch.zeros(traj_lens.sum(), device=device)
-        log_p_b = torch.zeros(traj_lens.sum(), device=device)
+            # stack each trajectory so we can use torch_scatter
+            log_p_f = torch.zeros(traj_lens.sum(), device=device)
+            log_p_b = torch.zeros(traj_lens.sum(), device=device)
 
-        idx = 0
-        # for each action, compute the sum of token log probs with prev state (p_f) and next state (p_b)
-        prev_states = [state for states, __, __ in trajs for state in states[:-1]]
-        next_states = [state for states, __, __ in trajs for state in states[1:]]
-        actions = [action for __, actions, _ in trajs for action in actions]
-        fwd_inputs = [state + action for state, action in zip(prev_states, actions, strict=True)]
-        bck_inputs = [state + action for state, action in zip(next_states, actions)]
+            idx = 0
+            # for each action, compute the sum of token log probs with prev state (p_f) and next state (p_b)
+            prev_states = [state for states, __, __ in trajs for state in states[:-1]]
+            next_states = [state for states, __, __ in trajs for state in states[1:]]
+            actions = [action for __, actions, _ in trajs for action in actions]
+            fwd_inputs = [state + action for state, action in zip(prev_states, actions, strict=True)]
+            bck_inputs = [state + action for state, action in zip(next_states, actions)]
 
         fwd_padded = policy.tokenizer.pad({"input_ids": fwd_inputs}, padding_side="right", return_tensors="pt")
         bck_padded = policy.tokenizer.pad({"input_ids": bck_inputs}, padding_side="right", return_tensors="pt")
@@ -660,40 +668,42 @@ def train_gflownet(
                     log_p_f[idx] += fwd_log[idx, len(prev_states[idx]) + i, actions[idx][i]]
                     log_p_b[idx] += bck_log[idx, len(next_states[idx]) + i, actions[idx][i]]
 
-        # 3. compute TB loss with TLM backward policy
-        log_rewards_tensor = torch.tensor([reward for _, _, reward in trajs], device=device)
+            # 3. compute TB loss with TLM backward policy
+            log_rewards_tensor = torch.tensor([reward for _, _, reward in trajs], device=device)
 
-        batch_idx = torch.arange(len(traj_lens), device=device).repeat_interleave(traj_lens)
+            batch_idx = torch.arange(len(traj_lens), device=device).repeat_interleave(traj_lens)
 
-        traj_log_p_F = scatter(log_p_f, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
-        traj_log_p_B = scatter(log_p_b, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
+            traj_log_p_F = scatter(log_p_f, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
+            traj_log_p_B = scatter(log_p_b, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
 
-        back_loss = traj_log_p_B.mean()
-        traj_log_p_B = traj_log_p_B.detach()
+            back_loss = traj_log_p_B.mean()
+            traj_log_p_B = traj_log_p_B.detach()
 
-        traj_diffs = (log_z + traj_log_p_F) - (log_rewards_tensor + traj_log_p_B)
-        tb_loss = huber_loss(traj_diffs).mean()
+            traj_diffs = (log_z + traj_log_p_F) - (log_rewards_tensor + traj_log_p_B)
+            tb_loss = huber_loss(traj_diffs).mean()
 
-        loss = tb_loss + back_loss
+            loss = tb_loss + back_loss
 
-        tb_loss_agg += tb_loss
-        back_loss_agg += back_loss
+            tb_loss_agg += tb_loss
+            back_loss_agg += back_loss
 
-        training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
-        training_bar.refresh()
+            training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
+            training_bar.refresh()
 
-        loss.backward()
+        scaler.scale(loss).backward()
         training_metrics = {"train/tb_loss": tb_loss, "train/back_loss": back_loss,
                    "train/sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
                    "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item()}
         wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
+            scaler.unscale_(optimizer)
+            scaler.unscale_(z_optimizer)
             nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
-
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.step(z_optimizer)
+            scaler.update()
             optimizer.zero_grad()
-            z_optimizer.step()
             z_optimizer.zero_grad()
         
         if r % eval_steps == 0:
@@ -744,6 +754,8 @@ def main():
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
         eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir)) # , sample_count=args.eval_theorems
+        start_loader = DataLoader(eval_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
+                                  num_workers=args.num_workers, persistent_workers=False)
         eval_loader = DataLoader(eval_states, batch_size=args.eval_batch_size,
                                  collate_fn=collate_skip_none, shuffle=False, num_workers=args.num_workers)
         tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
@@ -793,8 +805,8 @@ def main():
         eval_steps = args.eval_steps
         eval_repeats = args.eval_repeats
 
-        optimizer = optim.AdamW(policy.model.get_non_z_params())
-        z_optimizer = optim.AdamW(policy.model.get_z_params())
+        optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=1e-4)
+        z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
 
         print("Initializing precomputed trajectories")
         precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy)
