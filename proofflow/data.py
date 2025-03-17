@@ -303,9 +303,11 @@ def parse_json(json_path: Path) -> Generator[Theorem, None, None]:
 
 
 class TheoremDataset(Dataset):
-    def __init__(self, json_path: Path):
+    def __init__(self, json_path: Path, sample_count: int = -1):
         self.json_path = json_path
         self.thms = list(parse_json(json_path))
+        if sample_count > 0:
+            self.thms = self.thms[:sample_count]
         # Filter to only theorems with traced tactics
         self.thms = list(filter(lambda thm: thm.traced_tactics, self.thms))
         # Filter to not include .lake files
@@ -319,8 +321,8 @@ class TheoremDataset(Dataset):
 
 
 class TrainSampleDataset(TheoremDataset):
-    def __init__(self, json_path: Path):
-        super().__init__(json_path)
+    def __init__(self, json_path: Path, sample_count: int = -1):
+        super().__init__(json_path, sample_count)
         self.samples = [sample for thm in self.thms for sample in thm.to_samples()]
         self._filter_length(20_000)
 
@@ -338,8 +340,8 @@ class TrainSampleDataset(TheoremDataset):
 
 
 class ProofStateDataset(TheoremDataset):
-    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path):
-        super().__init__(json_path)
+    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path, sample_count: int = -1):
+        super().__init__(json_path, sample_count)
         self.handler_factory = handler_factory
         self.repo_path = repo_path
         self.tmp_dir = tmp_dir

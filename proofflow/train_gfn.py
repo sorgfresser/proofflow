@@ -225,8 +225,11 @@ class MCTS:
 
 
 async def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], LeanREPLAsyncHandler], repeats: int = 1) -> \
-        Tuple[List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]:
-    batch = next(start_loader)
+        Optional[Tuple[List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]]:
+    try:
+        batch = next(start_loader)
+    except StopIteration:
+        return None
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
     # Will be thm[0] k times, then thm 1 k times etc.
     thms = [thm for thm in thms for _ in range(repeats)]
@@ -491,11 +494,12 @@ class BackgroundDataLoader:
     async def _run_async(self):
         """The async producer coroutine that fetches data and puts it into the queue."""
         while not self.stop_flag:
-            try:
-                _, start_states, handlers = await _get_start_states(self.dataloader_iter, self.handler_factory)
-            except StopIteration:
-                raise RuntimeError("Should not happen")
+            result = await _get_start_states(self.dataloader_iter, self.handler_factory)
+            if result is None:
+                break
+            _, start_states, handlers = result
             await self.queue.put((start_states, handlers))
+        await self.queue.put(None)
 
     async def start_background(self):
         """Start the background task that fetches data."""
@@ -512,6 +516,37 @@ class BackgroundDataLoader:
         while not self.queue.empty():
             await self.queue.get()
         await self.task
+
+def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLAsyncHandler],
+             device: str, eval_repeats: int, search_time: int, max_retries: int) -> dict[str, float]:
+    bg_eval_loader = BackgroundDataLoader(eval_loader, handler_factory)
+    loop.run_until_complete(bg_eval_loader.start_background())
+    similarities = []
+    rewards = []
+    with torch.no_grad():
+        with tqdm(total=len(eval_loader)) as pbar:
+            for batch_idx in range(len(eval_loader)):
+                batch = loop.run_until_complete(bg_eval_loader.get_next_batch())
+                eval_states, eval_handlers = batch
+                state_trajectories, action_trajectories, gen_log_rewards = sample_mcts_trajectories(
+                    policy, eval_states, eval_handlers, search_time, device, max_retries=max_retries
+                )
+                mean_similarity = 0
+                for i in range(len(action_trajectories) // eval_repeats):
+                    trajs = action_trajectories[i * eval_repeats:(i + 1) * eval_repeats]
+                    mean_similarity += get_similarity(trajs)
+
+                gen_log_rewards_tensor = torch.tensor(gen_log_rewards, device=device)
+                similarities.append(mean_similarity)
+                rewards.append(gen_log_rewards_tensor.exp().mean().item())
+                pbar.update(1)
+
+    metrics = {
+        "validation/mean_reward": sum(rewards) / len(rewards),
+        "validation/similarity": float(sum(similarities)) / len(similarities)
+    }
+    loop.run_until_complete(bg_eval_loader.stop())
+    return metrics
 
 def train_gflownet(
         policy: Policy,
@@ -555,11 +590,7 @@ def train_gflownet(
     bg_loader = BackgroundDataLoader(start_loader, handler_factory)
     loop.run_until_complete(bg_loader.start_background())
 
-    bg_eval_loader = BackgroundDataLoader(eval_loader, handler_factory)
-    loop.run_until_complete(bg_eval_loader.start_background())
-
-    print("Training")
-
+    print("Training...")
     training_bar = trange(rounds)
     for r in training_bar:
 
@@ -652,6 +683,10 @@ def train_gflownet(
         training_bar.refresh()
 
         loss.backward()
+        training_metrics = {"train/tb_loss": tb_loss, "train/back_loss": back_loss,
+                   "train/sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
+                   "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item()}
+        wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
             nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
@@ -662,52 +697,19 @@ def train_gflownet(
             z_optimizer.zero_grad()
         
         if r % eval_steps == 0:
-
-            with torch.no_grad():
-
-                start_states, handlers = # TODO: get states here from bg_eval_loader
-
-                state_trajectories, action_trajectories, gen_log_rewards = sample_mcts_trajectories(
-                    policy, start_states, eval_handlers, search_time, device, max_retries=max_retries
-                )
-
-                mean_similarity = 0
-                for i in range(len(action_trajectories) // eval_repeats):
-                    trajs = action_trajectories[i*eval_repeats:(i+1)*eval_repeats]
-                    mean_similarity += get_similarity(trajs)
-
-            gen_log_rewards_tensor = torch.tensor(gen_log_rewards, device=device)
-            metrics = {
-                "sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
-                "eval_mean_reward": gen_log_rewards_tensor.exp().mean().item(),
-                "eval_similarity": mean_similarity,
-                "tb_loss": tb_loss_agg,
-                "back_loss": back_loss_agg,
-                "mean_action_p_f": log_p_f.mean().item(),
-                "mean_action_p_b": log_p_b.mean().item()
-                # Would be interesting to track this last metric for different values of state_skip
-                # in _build_prompt if p_b goes down as state_skip increases, that might imply it
-                # makes the graph less like a tree, which is interesting because in the case where
-                # state_skip -> infinity (i.e. the gfn state is the proof state, which should be the
-                # default for normal RL), we can say that it does not look like a tree, and
-                # therefore GFNs are useful and, additionally, that backward policies matter a lot.
-            }
-            metrics_list.append(metrics)
-
+            eval_metrics = evaluate(policy, loop, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries)
+            eval_metrics.update(training_metrics)
+            metrics_list.append(eval_metrics)
             np.save(metrics_path, np.array(metrics_list, dtype=object), allow_pickle=True)
-
             policy.save(checkpoint_path)
-
-            #wandb.log(metrics, step=r)
-            #wandb.log_model(checkpoint_path, name=f"model-round-{r}")
+            wandb.log(eval_metrics, step=r)
+            wandb.log_model(checkpoint_path, name=f"model-round-{r}")
 
     loop.run_until_complete(bg_loader.stop())
-    loop.run_until_complete(bg_eval_loader.stop())
     loop.close()
 
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
-
 
 def main():
     torch.set_float32_matmul_precision('high')
@@ -717,6 +719,7 @@ def main():
     parser.add_argument("--d-model", type=int, default=960)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--eval-batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--load-checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--save-checkpoint-path", type=str, default="checkpoint.pt")
@@ -740,10 +743,9 @@ def main():
                                          Path(tmp_dir))
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
-        eval_states = ProofStateDataset(LEAN_DOJO_PATH / "proof_flow_theorems.json", handler_factory, Path("./mathlib4"), Path(tmp_dir))
-        eval_states.thms = eval_states.thms[args.eval_theorems]
-        eval_loader = DataLoader(eval_states, batch_size=1, collate_fn=collate_skip_none, shuffle=False,
-                                             num_workers=args.num_workers)
+        eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir)) # , sample_count=args.eval_theorems
+        eval_loader = DataLoader(eval_states, batch_size=args.eval_batch_size,
+                                 collate_fn=collate_skip_none, shuffle=False, num_workers=args.num_workers)
         tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -767,9 +769,11 @@ def main():
         tokenizer.pad_token = "[PAD]"
 
         checkpoint_path = Path(args.load_checkpoint_path)
-
+        print("Initializing model")
         if args.reload_checkpoint:
             policy = MambaPolicy.from_file(checkpoint_path, True, tokenizer, device)
+            d_model = policy.config.d_model
+            n_layers = policy.config.n_layer
         else:
             config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
             model = MambaLMHeadModelWrapper(config, device=device, is_gflownet=True)
@@ -792,16 +796,20 @@ def main():
         optimizer = optim.AdamW(policy.model.get_non_z_params())
         z_optimizer = optim.AdamW(policy.model.get_z_params())
 
+        print("Initializing precomputed trajectories")
         precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy)
 
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
-                "gradient_accumulation_steps": gradient_accumulation_steps}
-        #wandb.init(project="proofflow", config=config)
+                  "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
+                  "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
+                  "search_time": args.search_time}
+        wandb.init(project="proofflow", config=config)
         train_gflownet(policy, start_loader, precomputed_trajectories, async_handler_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_loader,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        max_retries=args.num_tactics, search_time=args.search_time)
-        #wandb.finish(exit_code=0)
+
+        wandb.finish(exit_code=0)
 
 
 if __name__ == '__main__':
