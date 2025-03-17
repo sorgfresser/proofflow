@@ -386,11 +386,11 @@ def sample_mcts_trajectories(
                     rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
                     # Only passes on valid tactics to expand, we might want to change this
 
-                    tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
-                    goals_node = [g for g, p in zip(goals[current_idx], invalid) if not p]
-                    times_current_node = [t for t, p in zip(times_current[current_idx], invalid) if not p]
-                    indices_node = [index for index, p in zip(indices[current_idx], invalid) if not p]
-                    rewards = [r for r, p in zip(rewards, invalid) if not p]
+                    tactics = [t for t, p in zip(tactic_strings[current_idx], invalid[current_idx], strict=True) if not p]
+                    goals_node = [g for g, p in zip(goals[current_idx], invalid[current_idx], strict=True) if not p]
+                    times_current_node = [t for t, p in zip(times_current[current_idx], invalid[current_idx], strict=True) if not p]
+                    indices_node = [index for index, p in zip(indices[current_idx], invalid[current_idx], strict=True) if not p]
+                    rewards = [r for r, p in zip(rewards, invalid[current_idx], strict=True) if not p]
                     expanded_node_count += 1
                     if tactics:
                         valid_child_count += 1
@@ -450,6 +450,7 @@ def sample_mcts_trajectories(
     for i, t in enumerate(state_trajectories):
         if not start_states[i].done:
             t[0].append(t[0][-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
+    assert all(len(state) == len(action) + 1 for state, action in zip(state_trajectories, action_trajectories, strict=True))
 
     close_futures = [handler.close() for handler in handlers]
     loop = asyncio.get_event_loop()
