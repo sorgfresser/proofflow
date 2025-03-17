@@ -390,6 +390,7 @@ def sample_mcts_trajectories(
                     elif node.root.branch_is_done:
                         node.done = True
                         node.solved = False
+                        node.last_tactic = tactic_strings[current_idx][0] # all of them are unproven, just take 0
                     current_idx += 1
 
         except Exception as e:
@@ -689,11 +690,12 @@ def train_gflownet(
 
             training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
             training_bar.refresh()
-
+        action_lengths = sum(map(len, actions), 0) / len(actions)
         scaler.scale(loss).backward()
         training_metrics = {"train/tb_loss": tb_loss, "train/back_loss": back_loss,
                    "train/sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
-                   "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item()}
+                   "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
+                   "train/action_lengths": action_lengths}
         wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
