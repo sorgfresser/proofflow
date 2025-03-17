@@ -32,5 +32,10 @@ poetry run pip3 install --no-use-pep517 causal-conv1d
 poetry run pip3 install mamba-ssm
 ```
 
+And then clone the batteries repo into mathlib
+```bash
+git clone https://github.com/leanprover-community/batteries.git mathlib4/.lake/packages/batteries && cd mathlib4/.lake/packages/batteries && git checkout bba0af6e930ebcbabfacf021b21dd881d58aaa9d
+```
+
 # Usage
 
