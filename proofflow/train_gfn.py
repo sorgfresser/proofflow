@@ -708,7 +708,7 @@ def train_gflownet(
             traj_log_p_F = scatter(log_p_f, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
             traj_log_p_B = scatter(log_p_b, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
 
-            back_loss = traj_log_p_B.mean()
+            back_loss = -traj_log_p_B.mean()
             traj_log_p_B = traj_log_p_B.detach()
 
             traj_diffs = (log_z + traj_log_p_F) - (log_rewards_tensor + traj_log_p_B)
