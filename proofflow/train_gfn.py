@@ -905,10 +905,11 @@ def main():
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
                   "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed, "train_repeats": train_repeats}
         wandb.init(project="proofflow", config=config, entity="scalogi")
+        save_checkpoint_path = Path(args.save_checkpoint_path + "_" + str(batch_size) + "_" + str(train_repeats))
         train_gflownet(policy, start_loader, precomputed_trajectories, handler_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
                        eval_batch_size,
-                       eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
+                       eval_repeats, device, save_checkpoint_path, Path(args.save_metrics_path),
                        partial(linear_schedule_length, initial_length=1, every_steps=100),
                        max_retries=args.num_tactics, search_time=args.search_time, train_repeats=train_repeats, temperature=args.temperature)
 
