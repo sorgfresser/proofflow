@@ -333,9 +333,9 @@ critic_model = AutoModel.from_pretrained(
 critic_tokenizer = AutoTokenizer.from_pretrained("internlm/internlm2_5-step-prover-critic", trust_remote_code=True)
 
 
-def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[float], length: int, proof_state: List[str]) -> List[float]:
+def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[float], length: int, proof_states: List[str]) -> List[float]:
     rewards = []
-    for p, i, _t in zip(proven, invalid, times, proof_state):
+    for p, i, _t, proof_state in zip(proven, invalid, times, proof_states):
         chat = [
             {"role": "user", "content": "Which state is closer to 'no goals'?"},
             {"role": "assistant", "content": f"{proof_state}"},
@@ -348,7 +348,7 @@ def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[f
         else:  # ongoing = small reward
             # rewards.append(0.1 + 0.25*exp(-t))  # compute time does not work with precomputed proofs
             score1 = critic_model.get_score(critic_tokenizer, chat)
-            rewards.append(log(score1) + log(1 - exp(-length / 5)))
+            rewards.append(log(score1 + 4) + log(1 - exp(-length / 5)))
     return rewards
 
 
