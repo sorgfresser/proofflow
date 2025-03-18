@@ -316,7 +316,7 @@ class TheoremDataset(Dataset):
             self.thms = list(filter(lambda thm: not ".lake" in thm.file_path, self.thms))
         # Filter short
         print("Filtering from samples:", len(self.thms))
-        self._filter_length(5_000)
+        self._filter_length(250)
         print("Filtering to samples:", len(self.thms))
 
 

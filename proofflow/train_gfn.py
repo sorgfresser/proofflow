@@ -20,12 +20,11 @@ from math import sqrt
 from mamba_ssm.models.config_mamba import MambaConfig
 from tqdm import trange, tqdm
 from argparse import ArgumentParser
-import asyncio
 import wandb
 import numpy as np
 import random
 from transformers import AutoModel, AutoTokenizer
-
+import re
 
 
 class ModelBlock(nn.Module):
@@ -215,6 +214,7 @@ class Node:
 class MCTS:
     def __init__(self, root: Node):
         self.root = root
+        self.metadata = root.metadata
         self.proof = ""
         self.time = 0.0
         self.step_count = 0
@@ -245,7 +245,7 @@ class MCTS:
         return node
 
 
-def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler]) -> \
+def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler], num_repeats: int = 1) -> \
         Optional[Tuple[List[LeanREPLProofState], List[MCTS]]]:
     try:
         batch = next(start_loader)
@@ -253,8 +253,8 @@ def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler]) -
         return None
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
     # Will be thm[0] k times, then thm 1 k times etc.
-    thms = [thm for thm in thms]
-    paths = [path for path in paths]
+    thms = [thm for thm in thms for _ in range(num_repeats)]
+    paths = [path for path in paths for _ in range(num_repeats)]
     # Start all REPLs
     proof_states= [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
     # Gather
@@ -268,6 +268,21 @@ def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler]) -
                   metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}) for proof_state, thm in
              zip(proof_states, thms)]
     return proof_states, [MCTS(node) for node in nodes]
+
+
+period_regex = re.compile(r"(\w+)(\s)\.(\s)(\w+)")
+subscript_regex = re.compile(r"(\w+)(\s)([₀₁₂₃₄₅₆₇₈₉])")
+
+def postprocess_tactic(tactic: str):
+    original = tactic
+    tactic = re.sub(period_regex, r"\g<1>.\g<4>", original)
+    tactic = re.sub(subscript_regex, r"\g<1>\g<3>", tactic)
+    while original != tactic:
+        original = tactic
+        tactic = re.sub(period_regex, r"\g<1>.\g<4>", original)
+        tactic = re.sub(subscript_regex, r"\g<1>\g<3>", tactic)
+    return tactic
+
 
 def _envs_expand(
         handlers: list[LeanREPLHandler],
@@ -293,6 +308,17 @@ def _envs_expand(
                 msg.severity == "error" for msg in response["messages"])
             has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(
                 msg.severity == "error" for msg in response.messages))
+            # Try again with the postprocessed version
+            if has_error:
+                start_time = time.perf_counter()
+                handler.send_tactic(postprocess_tactic(tactic), proof_state_idx)
+                response, _ = handler.receive_json()
+                times[i][-1] = time.perf_counter() - start_time
+                has_error = "message" in response and response["message"].startswith("Lean error")
+                has_error = has_error or "messages" in response and any(
+                    msg.severity == "error" for msg in response["messages"])
+                has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(
+                    msg.severity == "error" for msg in response.messages))
             if has_error:
                 invalid[i].append(True)
                 proven[i].append(False)
@@ -332,9 +358,9 @@ critic_model = AutoModel.from_pretrained(
 critic_tokenizer = AutoTokenizer.from_pretrained("internlm/internlm2_5-step-prover-critic", trust_remote_code=True)
 
 
-def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[float], length: int, proof_state: List[str]) -> List[float]:
+def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[float], length: int, proof_states: List[str]) -> List[float]:
     rewards = []
-    for p, i, _t in zip(proven, invalid, times, proof_state):
+    for p, i, _t, proof_state in zip(proven, invalid, times, proof_states):
         chat = [
             {"role": "user", "content": "Which state is closer to 'no goals'?"},
             {"role": "assistant", "content": f"{proof_state}"},
@@ -347,7 +373,7 @@ def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[f
         else:  # ongoing = small reward
             # rewards.append(0.1 + 0.25*exp(-t))  # compute time does not work with precomputed proofs
             score1 = critic_model.get_score(critic_tokenizer, chat)
-            rewards.append(log(score1) + log(1 - exp(-length / 5)))
+            rewards.append(log(score1 + 4) + log(1 - exp(-length / 5)))
     return rewards
 
 
@@ -358,7 +384,8 @@ def sample_mcts_trajectories(
         search_time: int,
         device: str,
         max_len: int = 10,
-        max_retries: int = 5
+        max_retries: int = 5,
+        temperature: float = 0.7
 ) -> Tuple[List[List[List[int]]], List[List[List[int]]], list[float], int, float]:
     action_trajectories = [[] for __ in start_states]  # list of actions for each proof
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
@@ -393,7 +420,7 @@ def sample_mcts_trajectories(
                 histories = [current.previous_states for current in currents]
 
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    tactic_strings = policy.next_tactics(end_states, max_retries, None, histories, temperature=1)
+                    tactic_strings = policy.next_tactics(end_states, max_retries, None, histories, temperature=temperature)
 
                 current_handlers = [handlers[node_idx] for node_idx in range(len(start_states)) if not start_states[node_idx].done]
                 proven, invalid, indices, goals, times_current = _envs_expand(current_handlers, tactic_strings,
@@ -462,14 +489,14 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            log_rewards[i] = _compute_log_internlm([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1, [node.root.proof_state])[0]
             if node.done:
                 end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
                 state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
                 done[i] = True
 
         idx += 1
-
+    for i, node in enumerate(start_states):
+        log_rewards[i] = _compute_log_internlm([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1, [node.root.proof_state])[0]
     for i, t in enumerate(state_trajectories):
         if not start_states[i].done:
             t.append(t[-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
@@ -481,6 +508,7 @@ def sample_mcts_trajectories(
 
 # TODO: use levenshtein distance
 def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
+    return 0  # TODO: fix list not hashable
     # here we compute the mean number of length N subsequences in pairs of trajectories
     result = 0
 
@@ -489,7 +517,7 @@ def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
         traj_dict = {}
         for sub_idx in range(len(action_traj)-N+1):
             sub_seq = action_traj[sub_idx:sub_idx+N]
-            traj_dict[sub_seq] = traj_dict.get(sub_seq, 0) + 1  # TODO: fix list not hashable
+            traj_dict[sub_seq] = traj_dict.get(sub_seq, 0) + 1
         traj_dicts.append(traj_dict)
 
     for a_0 in traj_dicts:
@@ -499,10 +527,13 @@ def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
 
 
 class PrecomputedTrajectoryDataset(TheoremDataset):
-    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy):
+    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy, create_lookup: bool = False):
         super().__init__(data_path)
         self.tokenizer = tokenizer
         self.policy = policy
+        self._lookup = None
+        if create_lookup:
+            self._lookup = {thm.full_name: idx for idx, thm in enumerate(self.thms)}
 
     def __getitem__(self, item: int) -> Tuple[List[List[int]], List[List[int]], float]:
         thm = super().__getitem__(item)
@@ -519,10 +550,14 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
         log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
         return gfn_states, gfn_actions, log_reward
 
+    def lookup(self, theorem_name: str) -> int:
+        assert self._lookup
+        return self._lookup[theorem_name]
+
 
 
 def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLHandler],
-             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int) -> dict[str, float]:
+             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int, name: str) -> dict[str, float]:
 
     similarities = []
     rewards = []
@@ -559,10 +594,10 @@ def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[
                 pbar.update(1)
 
     metrics = {
-        "validation/mean_reward": sum(rewards) / len(rewards),
-        "validation/similarity": float(sum(similarities)) / len(similarities),
-        "validation/nodes_proven": nodes_proven,
-        "validation/proof_state_ratio": proof_state_ratio
+        f"validation/mean_reward_{name}": sum(rewards) / len(rewards),
+        f"validation/similarity_{name}": float(sum(similarities)) / len(similarities),
+        f"validation/nodes_proven_{name}": nodes_proven,
+        f"validation/proof_state_ratio_{name}": proof_state_ratio
     }
     return metrics
 
@@ -593,7 +628,9 @@ def train_gflownet(
         length_schedule: Callable[[int], int],
         replay_buffer_len: int = 1_000,
         max_retries: int = 5,
-        search_time: int = 100
+        search_time: int = 100,
+        train_repeats: int = 1,
+        temperature: float = 0.7
 ):
 
     policy.model.train()
@@ -607,7 +644,7 @@ def train_gflownet(
     replay_buffer = [None] * replay_buffer_len
     replay_end, replay_saturated = 0, False
 
-    tb_loss_acc = back_loss_acc = 0
+    tb_loss_acc = back_loss_acc = reward_acc = 0
     metrics_list = []
 
     print("Training...")
@@ -615,21 +652,21 @@ def train_gflownet(
 
     data_iter = iter(start_loader)
     for r in training_bar:
-        handlers = [handler_factory() for _ in range(batch_size_replay)]
+        handlers = [handler_factory() for _ in range(batch_size_replay * train_repeats)]
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
             current_length = length_schedule(r)
-            batch = _get_start_states(data_iter, handlers)
+            batch = _get_start_states(data_iter, handlers, num_repeats=train_repeats)
             if batch is None:
                 data_iter = iter(start_loader)
-                batch = _get_start_states(data_iter, handlers)
+                batch = _get_start_states(data_iter, handlers, num_repeats=train_repeats)
             # If the whole batch was invalid, quite unlikely, but possible
             if not batch:
                 continue
             _, start_states = batch
             try:
                 state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ration = sample_mcts_trajectories(
-                    policy, start_states, handlers, search_time, device, max_retries=max_retries, max_len=current_length
+                    policy, start_states, handlers, search_time, device, max_retries=max_retries, max_len=current_length, temperature=temperature
                 )
             except BrokenPipeError:
                 # Reset handlers, try again
@@ -637,24 +674,25 @@ def train_gflownet(
                 continue
             gc.collect()
 
-            for t in zip(state_trajectories, action_trajectories, gen_log_rewards):
-
-                replay_buffer[replay_end] = t
-                replay_end += 1
-
-                if replay_end >= replay_buffer_len:
-                    replay_saturated = True
-                    replay_end = 0
+            # for t in zip(state_trajectories, action_trajectories, gen_log_rewards):
+            #
+            #     replay_buffer[replay_end] = t
+            #     replay_end += 1
+            #
+            #     if replay_end >= replay_buffer_len:
+            #         replay_saturated = True
+            #         replay_end = 0
 
             sampled_mean_reward = sum(map(exp, gen_log_rewards)) / len(gen_log_rewards)
             action_lengths = sum(map(len, action_trajectories)) / len(action_trajectories)
 
             # 1. randomly sample from the replay buffer and from human trajectories
-            end_idx = replay_buffer_len if replay_saturated else replay_end
-            idxs_replay = torch.randint(0, end_idx, (batch_size_replay,))
-            idxs_precomputed = torch.randint(0, len(precomputed_trajectories), (batch_size_sampled,))
-            trajs = [replay_buffer[i] for i in idxs_replay] + [precomputed_trajectories[i] for i in idxs_precomputed]
-
+            # end_idx = replay_buffer_len if replay_saturated else replay_end
+            # idxs_replay = torch.randint(0, end_idx, (batch_size_replay,))
+            # idxs_precomputed = torch.randint(0, len(precomputed_trajectories), (batch_size_sampled,))
+            # trajs = [replay_buffer[i] for i in idxs_replay] + [precomputed_trajectories[i] for i in idxs_precomputed]
+            idxs_precomputed = set([precomputed_trajectories.lookup(state.metadata["theoremname"]) for state in start_states])
+            trajs = list(zip(state_trajectories, action_trajectories, gen_log_rewards)) + [precomputed_trajectories[i] for i in idxs_precomputed]
         # 2. call the model on each trajectory
 
         z_prompts = [states[0] for states, _, _ in trajs]
@@ -714,12 +752,17 @@ def train_gflownet(
 
             training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
             training_bar.refresh()
+
+        unique_trajs = len(set([tuple([tuple(action) for action in actions]) for __, actions, __ in trajs]))
         scaler.scale(loss).backward()
+        reward_acc += sampled_mean_reward / gradient_accumulation_steps
         training_metrics = {"train/tb_loss": tb_loss.item(), "train/back_loss": back_loss.item(),
                             "train/sampled_mean_reward": sampled_mean_reward,
                             "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
-                            "train.mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
-                            "train/action_lengths": action_lengths, "train/mcts_max_length": current_length}
+                            "train/mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
+                            "train/action_lengths": action_lengths, "train/mcts_max_length": current_length, 
+                            "train/nodes_proven": nodes_proven, "train/proof_state_ration": proof_state_ration,
+                            "train/unique": unique_trajs/len(trajs)}
         wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
@@ -733,13 +776,15 @@ def train_gflownet(
             z_optimizer.zero_grad()
 
             training_metrics.update({"train/accumulated_tb_loss": tb_loss_acc,
-                                     "train/accumulated_back_loss": back_loss_acc})
-            tb_loss_acc = back_loss_acc = 0
+                                     "train/accumulated_back_loss": back_loss_acc,
+                                     "train/reward_acc": reward_acc})
+            tb_loss_acc = back_loss_acc = reward_acc = 0
 
         wandb.log(training_metrics, step=r)
-        
+
         if r % eval_steps == 0:
-            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size)
+            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "a")
+            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "b")
             eval_metrics.update(training_metrics)
             metrics_list.append(eval_metrics)
             np.save(metrics_path, np.array(metrics_list, dtype=object), allow_pickle=True)
@@ -756,25 +801,26 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--n-layers", type=int, default=30)
     parser.add_argument("--d-model", type=int, default=960)
-    parser.add_argument("--rounds", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--eval-batch-size", type=int, default=2)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument("--rounds", type=int, default=1_000)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--eval-batch-size", type=int, default=4)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--load-checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--save-checkpoint-path", type=str, default="checkpoint.pt")
     parser.add_argument("--save-metrics-path", type=str, default="metrics.npy")
     parser.add_argument("--reload-checkpoint", action="store_true", default=True)
     parser.add_argument("--num-tactics", type=int, default=10,
                         help="Number of tactics to sample from the policy per state")
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--search-time", type=int, default=100, help="Number of MCTS nodes to explore before selecting a tactic")
-    parser.add_argument("--eval-steps", type=int, default=1)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--search-time", type=int, default=3, help="Number of MCTS nodes to explore before selecting a tactic")
+    parser.add_argument("--eval-steps", type=int, default=100)
     parser.add_argument("--eval-theorems", type=int, default=20)
-    parser.add_argument("--eval-repeats", type=int, default=5)
-    parser.add_argument("--train-on-eval", action="store_true", default=False)
+    parser.add_argument("--eval-repeats", type=int, default=1)
+    parser.add_argument("--train-on-eval", action="store_true", default=True)
     parser.add_argument("--batch-size-precomputed", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--temperature", type=float, default=0.7)
     args = parser.parse_args()
     seed = args.seed
     torch.manual_seed(seed)
@@ -847,19 +893,22 @@ def main():
         z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
 
         print("Initializing precomputed trajectories")
-        precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy)
+        if args.train_on_eval:
+            precomputed_trajectories = PrecomputedTrajectoryDataset(Path("./proof_flow_theorems.json"), tokenizer, policy, create_lookup=True)
+        else:
+            precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy, create_lookup=True)
 
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
                   "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed}
-        wandb.init(project="proofflow", config=config)
+        wandb.init(project="proofflow", config=config, entity="scalogi")
         train_gflownet(policy, start_loader, precomputed_trajectories, handler_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
                        eval_batch_size,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
-                       partial(linear_schedule_length, initial_length=1, every_steps=10),
-                       max_retries=args.num_tactics, search_time=args.search_time)
+                       partial(linear_schedule_length, initial_length=1, every_steps=100),
+                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=5, temperature=args.temperature)
 
         wandb.finish(exit_code=0)
 
