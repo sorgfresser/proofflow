@@ -908,7 +908,7 @@ def main():
                        eval_batch_size,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        partial(linear_schedule_length, initial_length=1, every_steps=100),
-                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=5, temperature=args.temperature)
+                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=127, temperature=args.temperature)
 
         wandb.finish(exit_code=0)
 
