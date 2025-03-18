@@ -1,35 +1,31 @@
 import gc
-from collections.abc import Callable
 from dataclasses import dataclass
 from math import exp, log
 import time
-from collections import defaultdict
-from typing import Tuple, List, Union, Dict, Any, Iterator, Optional
-
+from typing import Tuple, List, Union, Dict, Any, Iterator, Optional, Callable
+from functools import partial
 from torch import nn
 import torch
 from torch_scatter import scatter
 from lean_repl_py import LeanREPLHandler, LeanREPLNextProofState, LeanREPLProofState, LeanREPLAsyncHandler
 from proofflow.model.ffm import FFM
-from proofflow.data import parse_json, LEAN_DOJO_PATH, TheoremDataset, TrainSampleDataset, TrainingSample, Theorem, \
-    UnknownMetaVariableError, ProofStateDataset
+from proofflow.data import parse_json, LEAN_DOJO_PATH, Theorem, ProofStateDataset, TheoremDataset
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from torch.utils.data import DataLoader
 from proofflow.policy import Policy, MambaLMHeadModelWrapper, MambaPolicy
-from transformers import PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast, PreTrainedTokenizer
 import torch.optim as optim
 from math import sqrt
-import wandb
 from mamba_ssm.models.config_mamba import MambaConfig
-from tqdm import tqdm
+from tqdm import trange, tqdm
 from argparse import ArgumentParser
 import asyncio
+import wandb
+import numpy as np
+import random
+from transformers import AutoModel, AutoTokenizer
 
-MAX_TRAJ_LEN = 10
-MAX_OUTPUT_LEN = 20
-GET_STATE_EVERY = 2  # we want semantically similar proofs to have the same states. Increasing this helps to do that
-TEMPERATURE = 1
 
 
 class ModelBlock(nn.Module):
@@ -100,60 +96,9 @@ class Model(nn.Module):
         return self.z_head[0].parameters()
 
 
-def collate_train_samples(batch: list[TrainingSample]):
-    return batch
-
-
-def evaluate(policy: Policy, data: TrainSampleDataset, eval_batch_size: int = 64) -> dict[str, float]:
-    metrics = defaultdict(float)
-    print("Evaluating")
-    with torch.no_grad():
-        for batch in tqdm(DataLoader(data, batch_size=eval_batch_size, shuffle=True, collate_fn=collate_train_samples)):
-            metrics_batch = policy.evaluate_batch(batch)
-            for key, value in metrics_batch.items():
-                metrics[key] += value
-        for key in metrics:
-            metrics[key] /= len(data) / eval_batch_size
-    return metrics
-
-
-def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimizer, gradient_accumulation_steps: int,
-               batch_size: int, eval_steps: int, valid_data: TrainSampleDataset, checkpoint_path: Path,
-               eval_batch_size: int = 4, epochs: int = 3):
-    data_loader = DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=collate_train_samples)
-    policy.model.train()
-    optimizer.zero_grad()
-    current_step = 0
-    print(f"Saving model to {checkpoint_path}")
-    policy.save(checkpoint_path)
-    for epoch in range(epochs):
-        for batch in tqdm(data_loader):
-            loss = policy.train_batch(batch) / gradient_accumulation_steps
-            wandb.log({"train/loss": loss, "epoch": current_step / len(data_loader)}, step=current_step)
-            loss.backward()
-            if (current_step + 1) % gradient_accumulation_steps == 0:
-                nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
-                optimizer.step()
-                optimizer.zero_grad()
-            if (current_step + 1) % eval_steps == 0:
-                metrics = evaluate(policy, valid_data, eval_batch_size)
-                metrics = {f"validation/{key}": value for key, value in metrics.items()}
-                wandb.log(metrics, step=current_step)
-                print(metrics)
-            current_step += 1
-        print(f"Epoch {epoch} done")
-        print(f"Saving model to {checkpoint_path}")
-        policy.save(checkpoint_path)
-    print("Training done")
-    metrics = evaluate(policy, valid_data, eval_batch_size)
-    metrics = {f"validation/{key}": value for key, value in metrics.items()}
-    wandb.log(metrics)
-
-
 def huber_loss(x, beta=1, i_delta=4):
     ax = torch.abs(x)
     return torch.where(ax <= beta, 0.5 * x * x, beta * (ax - beta / 2)) * i_delta
-
 
 # retrieve the initial theorems
 def get_start_theorems(path):
@@ -165,7 +110,6 @@ def get_start_theorems(path):
         if ".lake" in thm.file_path:
             continue
         yield thm
-
 
 @dataclass
 class Node:
@@ -202,12 +146,18 @@ class Node:
         for idx, tactic in enumerate(tactics):
             # Duplicates in tactics are possible
             if tactic not in self.children_for_tactics:
+                # Avoid cycles
+                if proof_states[idx] in self.previous_states:
+                    continue
                 self.children_for_tactics[tactic] = Node(proof_states[idx], parent=self, parent_tactic=tactic,
                                                          previous_states=self.previous_states + [self.proof_state],
                                                          proof_state_idx=indices[idx], metadata=self.metadata)
                 self.times[tactic] = times[idx]
                 self.total_action_values[tactic] = values[idx]
                 self.visit_counts[tactic] = 1
+        if not self.children_for_tactics:
+            self.backup_branch_done()
+            return
         self.backup()
 
     def backup_branch_done(self):
@@ -252,6 +202,15 @@ class Node:
             return self
         return self.children_for_tactics[self.best_action_policy()].select()
 
+    def subtree_count(self):
+        return 1 + sum(child.subtree_count() for child in self.children_for_tactics.values())
+
+    def valid_count(self):
+        if self.branch_is_done:
+            return 0
+        return 1 + sum(child.valid_count() for child in self.children_for_tactics.values())
+
+
 
 class MCTS:
     def __init__(self, root: Node):
@@ -266,13 +225,15 @@ class MCTS:
     def move(self):
         if self.done:
             return
-        best_tactic = self.root.select().best_action()
+        best_tactic = self.root.best_action()
         self.proof += best_tactic + "\n"
         self.time += self.root.times[best_tactic]
         self.root = self.root.children_for_tactics[best_tactic]
         self.root.parent = None  # speedup memory release
         self.step_count += 1
         self.last_tactic = best_tactic
+        if self.root.branch_is_done:
+            self.done = True
         gc.collect()
 
     def select(self) -> Node:
@@ -284,329 +245,409 @@ class MCTS:
         return node
 
 
-def _get_start_states(start_loader: Iterator) -> Tuple[
-    List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]:
-    async def _gather_proof_states(futures):
-        return await asyncio.gather(*futures)
-
-    start_time = time.perf_counter()
-    batch = next(start_loader)
-    print(f"Time to obtain batch: {time.perf_counter() - start_time}")
+def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler]) -> \
+        Optional[Tuple[List[LeanREPLProofState], List[MCTS]]]:
+    try:
+        batch = next(start_loader)
+    except StopIteration:
+        return None
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
-    start_time = time.perf_counter()
-    handlers = [LeanREPLAsyncHandler(Path("./leanproject")) for elem in paths]
+    # Will be thm[0] k times, then thm 1 k times etc.
+    thms = [thm for thm in thms]
+    paths = [path for path in paths]
     # Start all REPLs
-    proof_state_futures = [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
+    proof_states= [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
     # Gather
-    proof_states = asyncio.run(_gather_proof_states(proof_state_futures))
     proof_states = [proof_state for proof_state, env in proof_states]
-    print(f"Time to unpickle batch: {time.perf_counter() - start_time}")
     # Unlink them all, not needed anymore
+    assert all(path.exists() for path in paths)
     for path in paths:
-        path.unlink()
+        path.unlink(missing_ok=True) # missing ok because of repeats
     assert all(len(proof_state.goals) == 1 for proof_state in proof_states)
     nodes = [Node(proof_state.goals[0], proof_state_idx=proof_state.proof_state,
                   metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}) for proof_state, thm in
              zip(proof_states, thms)]
-    return proof_states, [MCTS(node) for node in nodes], handlers
-
-
-def _env_expand(handler: LeanREPLAsyncHandler, tactics: List[str], proof_state_indices: List[int]):
-    proven = []
-    invalid = []
-    indices = []
-    goals = []
-    times = []
-    for tactic, proof_state_idx in zip(tactics, proof_state_indices, strict=True):
-        curr_time = time.perf_counter()
-        asyncio.run(handler.send_tactic(tactic, proof_state_idx))
-        response, _ = asyncio.run(handler.receive_json())
-        times.append(time.perf_counter() - curr_time)
-        if "message" in response and response["message"].startswith("Lean error"):
-            invalid.append(True)
-            proven.append(False)
-            indices.append(None)
-            goals.append(None)
-            continue
-        assert isinstance(response, LeanREPLNextProofState)
-        proven.append(not response.goals)
-        invalid.append(False)
-        if not response.goals:
-            goals.append(None)
-        else:
-            goals.append(response.goals[0])  # only need one goal, it has all information
-        indices.append(response.proof_state)
-    return proven, invalid, indices, goals, times
-
-
-async def _process_single_env(handler: LeanREPLAsyncHandler, tactics: List[str], proof_state_indices: List[int],
-                              proven: List[bool], invalid: List[bool], indices: List[Optional[int]],
-                              goals: List[Optional[List[str]]], times: List[float]):
-    assert len(proven) == len(invalid) == len(indices) == len(goals) == 0
-    for tactic, proof_state_idx in zip(tactics, proof_state_indices, strict=True):
-        curr_time = time.perf_counter()
-        await handler.send_tactic(tactic, proof_state_idx)
-        response, _ = await handler.receive_json()
-        times.append(time.perf_counter() - curr_time)
-        if "message" in response and response["message"].startswith("Lean error"):
-            invalid.append(True)
-            proven.append(False)
-            indices.append(None)
-            goals.append(None)
-            continue
-        assert isinstance(response, LeanREPLNextProofState)
-        proven.append(not response.goals)
-        invalid.append(False)
-        if not response.goals:
-            goals.append(None)
-        else:
-            goals.append(response.goals[0])  # only need one goal, it has all information
-        indices.append(response.proof_state)
-
-async def _process_all_envs(handlers: List[LeanREPLAsyncHandler], tactics: List[List[str]],
-                            proof_state_indices: List[List[int]]):
-    proven = [[] for _ in handlers]
-    invalid = [[] for _ in handlers]
-    indices = [[] for _ in handlers]
-    goals = [[] for _ in handlers]
-    times = [[] for _ in handlers]
-    tasks = []
-    for i in range(len(handlers)):
-        tasks.append(
-            _process_single_env(handlers[i], tactics[i], proof_state_indices[i], proven[i], invalid[i], indices[i],
-                                goals[i], times[i]))
-    await asyncio.gather(*tasks)
-    return proven, invalid, indices, goals, times
-
+    return proof_states, [MCTS(node) for node in nodes]
 
 def _envs_expand(
-        handlers: list[LeanREPLAsyncHandler],
+        handlers: list[LeanREPLHandler],
         tactics: list[list[str]],
         proof_state_indices: list[list[int]]
 ):
     """Sends one tactic at a time per handler"""
     assert len(handlers) == len(tactics) == len(proof_state_indices)
-    proven, invalid, indices, goals, times = asyncio.run(_process_all_envs(handlers, tactics, proof_state_indices))
+    proven = [[] for _ in handlers]
+    invalid = [[] for _ in handlers]
+    indices = [[] for _ in handlers]
+    goals = [[] for _ in handlers]
+    times = [[] for _ in handlers]
+    for i in range(len(handlers)):
+        for tactic, proof_state_idx in zip(tactics[i], proof_state_indices[i], strict=True):
+            handler = handlers[i]
+            start_time = time.perf_counter()
+            handler.send_tactic(tactic, proof_state_idx)
+            response, _ = handler.receive_json()
+            times[i].append(time.perf_counter() - start_time)
+            has_error = "message" in response and response["message"].startswith("Lean error")
+            has_error = has_error or "messages" in response and any(
+                msg.severity == "error" for msg in response["messages"])
+            has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(
+                msg.severity == "error" for msg in response.messages))
+            if has_error:
+                invalid[i].append(True)
+                proven[i].append(False)
+                indices[i].append(None)
+                goals[i].append(None)
+                continue
+            assert isinstance(response, LeanREPLNextProofState)
+            proven[i].append(not response.goals)
+            invalid[i].append(False)
+            if not response.goals:
+                goals[i].append(None)
+            else:
+                goals[i].append(response.goals[0])  # only need one goal, it has all information
+            indices[i].append(response.proof_state)
     return proven, invalid, indices, goals, times
 
 
-def _compute_rewards(proven: List[bool], invalid: List[bool], times: List[float]):
+def _compute_log_rewards(proven: List[bool], invalid: List[bool], times: List[float], length: int) -> List[float]:
     rewards = []
-    for p, i, t in zip(proven, invalid, times):
+    for p, i, _t in zip(proven, invalid, times):
         if i:
             rewards.append(log(0.01))
-        elif p:
-            rewards.append(log(10) - t / 5)  # proof complete
-        else:
-            rewards.append(log(0.1) - t / 5)  # ongoing = small reward
+        elif p:  # proof complete
+            #rewards.append(1 + 15*exp(-t))  # compute time does not work with precomputed proofs
+            rewards.append(log(10) + log(1 - exp(-length / 5)))
+        else:  # ongoing = small reward
+            #rewards.append(0.1 + 0.25*exp(-t))  # compute time does not work with precomputed proofs
+            rewards.append(log(0.1) + log(1 - exp(-length / 5)))
     return rewards
+
+critic_model = AutoModel.from_pretrained(
+    "internlm/internlm2_5-step-prover-critic",
+    device_map="cpu",
+    torch_dtype=torch.float16,
+    trust_remote_code=True,
+)
+critic_tokenizer = AutoTokenizer.from_pretrained("internlm/internlm2_5-step-prover-critic", trust_remote_code=True)
+
+
+def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[float], length: int, proof_state: List[str]) -> List[float]:
+    rewards = []
+    for p, i, _t in zip(proven, invalid, times, proof_state):
+        chat = [
+            {"role": "user", "content": "Which state is closer to 'no goals'?"},
+            {"role": "assistant", "content": f"{proof_state}"},
+        ]
+        if i:
+            rewards.append(log(0.01))
+        elif p:  # proof complete
+            # rewards.append(1 + 15*exp(-t))  # compute time does not work with precomputed proofs
+            rewards.append(log(10) + log(1 - exp(-length / 5)))
+        else:  # ongoing = small reward
+            # rewards.append(0.1 + 0.25*exp(-t))  # compute time does not work with precomputed proofs
+            score1 = critic_model.get_score(critic_tokenizer, chat)
+            rewards.append(log(score1) + log(1 - exp(-length / 5)))
+    return rewards
+
+
+def sample_mcts_trajectories(
+        policy: Policy,
+        start_states: List[MCTS],
+        handlers: List[LeanREPLHandler],
+        search_time: int,
+        device: str,
+        max_len: int = 10,
+        max_retries: int = 5
+) -> Tuple[List[List[List[int]]], List[List[List[int]]], list[float], int, float]:
+    action_trajectories = [[] for __ in start_states]  # list of actions for each proof
+    state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
+    done = [False] * len(start_states)
+    log_rewards = [0] * len(start_states)
+
+    idx = 0
+    nodes_proven = 0
+    expanded_node_count = 0
+    valid_child_count = 0
+    while not all(node.done for node in start_states) and idx < max_len:
+
+        try:
+
+            for _ in range(search_time):
+
+                if all(node.done for node in start_states):
+                    break
+
+                currents = []
+                for node in start_states:
+
+                    if node.done:
+                        continue
+
+                    current = node.select()
+                    assert not current.has_been_expanded
+                    assert not current.branch_is_done
+                    currents.append(current)
+
+                end_states = [current.proof_state for current in currents]
+                histories = [current.previous_states for current in currents]
+
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    tactic_strings = policy.next_tactics(end_states, max_retries, None, histories, temperature=1)
+
+                current_handlers = [handlers[node_idx] for node_idx in range(len(start_states)) if not start_states[node_idx].done]
+                proven, invalid, indices, goals, times_current = _envs_expand(current_handlers, tactic_strings,
+                                            [[current.proof_state_idx] * len(tactic_strings[current_idx]) for current_idx, current in enumerate(currents)],)
+                current_idx = 0
+
+                for i, node in enumerate(start_states):
+
+                    if node.done:
+                        continue
+
+                    rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
+                    # Only passes on valid tactics to expand, we might want to change this
+
+                    tactics = [t for t, p in zip(tactic_strings[current_idx], invalid[current_idx], strict=True) if not p]
+                    goals_node = [g for g, p in zip(goals[current_idx], invalid[current_idx], strict=True) if not p]
+                    times_current_node = [t for t, p in zip(times_current[current_idx], invalid[current_idx], strict=True) if not p]
+                    indices_node = [index for index, p in zip(indices[current_idx], invalid[current_idx], strict=True) if not p]
+                    rewards = [r for r, p in zip(rewards, invalid[current_idx], strict=True) if not p]
+                    expanded_node_count += 1
+                    if tactics:
+                        valid_child_count += 1
+                    currents[current_idx].expand(tactics, goals_node, times_current_node, rewards, indices_node)
+                    if any(proven[current_idx]):
+                        node.done = True
+                        node.solved = True
+                        node.last_tactic = tactic_strings[current_idx][proven[current_idx].index(True)]
+                        nodes_proven += 1
+                    # Edge case, if we only have invalid tactics, there is no way to continue
+                    elif node.root.branch_is_done:
+                        node.done = True
+                        node.solved = False
+                        node.last_tactic = tactic_strings[current_idx][0] # all of them are unproven, just take 0
+                    current_idx += 1
+        except BrokenPipeError as e:
+            raise e
+        except Exception as e:
+            print(f"Error in MCTS: {e}")
+            print(f"Node: {node.root.proof_state}")
+            print(f"Proof: {node.proof}")
+            print(f"Current: {current.proof_state}")
+            print(f"Current previous states: {current.previous_states}")
+            print(f"Current tactic strings: {tactic_strings}")
+            print(f"Start states: {[state.root.proof_state for state in start_states]}")
+            print(f"Current metadata: {current.metadata}")
+            print(f"Node metadata: {node.root.metadata}")
+            strings = []
+            failed_node = current
+            while failed_node.parent is not None:
+                strings.append(failed_node.parent_tactic)
+                failed_node = failed_node.parent
+            current_proof = "\n".join(reversed(strings))
+            print(f"Current proof: {current_proof}")
+            raise e
+
+        # Actual MCTS move after trying a few nodes
+        for node in start_states:
+            node.move()
+        # Fill trajectories with the latest move, update rewards
+        prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) for node in
+                    start_states]
+
+        for i, node in enumerate(start_states):
+            if done[i]: continue
+            state_trajectories[i].append(prompts[i])
+            # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
+            action_trajectories[i].append(
+                policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
+            log_rewards[i] = _compute_log_internlm([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1, [node.root.proof_state])[0]
+            if node.done:
+                end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
+                state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
+                done[i] = True
+
+        idx += 1
+
+    for i, t in enumerate(state_trajectories):
+        if not start_states[i].done:
+            t.append(t[-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
+    assert all(len(state) == len(action) + 1 for state, action in zip(state_trajectories, action_trajectories, strict=True))
+
+    return state_trajectories, action_trajectories, log_rewards, nodes_proven, float(valid_child_count) / expanded_node_count
+
+
+
+# TODO: use levenshtein distance
+def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
+    # here we compute the mean number of length N subsequences in pairs of trajectories
+    result = 0
+
+    traj_dicts = []
+    for action_traj in action_trajs:
+        traj_dict = {}
+        for sub_idx in range(len(action_traj)-N+1):
+            sub_seq = action_traj[sub_idx:sub_idx+N]
+            traj_dict[sub_seq] = traj_dict.get(sub_seq, 0) + 1  # TODO: fix list not hashable
+        traj_dicts.append(traj_dict)
+
+    for a_0 in traj_dicts:
+        for a_1 in traj_dicts:
+            result += [a_1.get(k, 0) * v for k, v in a_0.items()]
+    return result / len(action_trajs)**2
+
+
+class PrecomputedTrajectoryDataset(TheoremDataset):
+    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy):
+        super().__init__(data_path)
+        self.tokenizer = tokenizer
+        self.policy = policy
+
+    def __getitem__(self, item: int) -> Tuple[List[List[int]], List[List[int]], float]:
+        thm = super().__getitem__(item)
+        gfn_actions: List[List[int]] = []
+        gfn_states: List[List[int]] = []
+        proof_states: List[str] = []
+        for tactic in thm.traced_tactics:
+            gfn_actions.append(self.tokenizer.encode(tactic.tactic))
+            gfn_states.append(self.policy._build_prompt(tactic.state_before, None, proof_states))
+            proof_states.append(tactic.state_before)
+        gfn_states.append(
+            self.policy._build_prompt(self.tokenizer.decode([self.policy.successful_proof_token]), None, proof_states))
+        complete = thm.traced_tactics[-1].state_after == "no goals"
+        log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
+        return gfn_states, gfn_actions, log_reward
+
+
+
+def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLHandler],
+             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int) -> dict[str, float]:
+
+    similarities = []
+    rewards = []
+    handlers = [handler_factory() for _ in range(batch_size)]
+    eval_iter = iter(eval_loader)
+    with torch.no_grad():
+        batch = _get_start_states(eval_iter, handlers)
+        with tqdm(total=len(eval_loader)) as pbar:
+            while batch is not None:
+                # If the whole batch was invalid, quite unlikely, but possible
+                if not batch:
+                    batch = _get_start_states(eval_iter, handlers)
+                    continue
+                _, start_states = batch
+                try:
+                    _state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
+                        policy, start_states, handlers, search_time, device, max_retries=max_retries
+                    )
+                except BrokenPipeError:
+                    print("Broken pipe error, starting eval all over")
+                    handlers = [handler_factory() for _ in range(batch_size)]
+                    eval_iter = iter(eval_loader)
+                    batch = _get_start_states(eval_iter, handlers)
+                    continue
+                mean_similarity = 0
+                for i in range(len(action_trajectories) // eval_repeats):
+                    trajs = action_trajectories[i * eval_repeats:(i + 1) * eval_repeats]
+                    mean_similarity += get_similarity(trajs)
+
+                gen_log_rewards_tensor = torch.tensor(gen_log_rewards, device=device)
+                similarities.append(mean_similarity)
+                rewards.append(gen_log_rewards_tensor.exp().mean().item())
+                batch = _get_start_states(eval_iter, handlers)
+                pbar.update(1)
+
+    metrics = {
+        "validation/mean_reward": sum(rewards) / len(rewards),
+        "validation/similarity": float(sum(similarities)) / len(similarities),
+        "validation/nodes_proven": nodes_proven,
+        "validation/proof_state_ratio": proof_state_ratio
+    }
+    return metrics
+
+def linear_schedule_length(round, initial_length: int = 1, every_steps: int = 1) -> int:
+    steps = round // every_steps
+    return steps + initial_length
 
 
 def train_gflownet(
         policy: Policy,
         start_loader: DataLoader,
-        precomputed_trajectories: List[Tuple[List[List[int]], List[List[int]]]],
+        precomputed_trajectories: PrecomputedTrajectoryDataset,
         # these are the human-written trajectories
-        repo_path: Path,
+        handler_factory: Callable[[], LeanREPLHandler],
         optimizer: optim.Optimizer,
         z_optimizer: optim.Optimizer,
         gradient_accumulation_steps: int,
         batch_size_replay: int,
         batch_size_sampled: int,
         rounds: int,
+        eval_steps: int,
+        eval_loader: DataLoader,
+        eval_batch_size: int,
+        eval_repeats: int,
         device: str,
+        checkpoint_path: Path,
+        metrics_path: Path,
+        length_schedule: Callable[[int], int],
         replay_buffer_len: int = 1_000,
         max_retries: int = 5,
         search_time: int = 100
 ):
-    assert precomputed_trajectories
+
     policy.model.train()
+    policy.save(checkpoint_path)
 
     optimizer.zero_grad()
     z_optimizer.zero_grad()
 
+    scaler = torch.GradScaler()
+
     replay_buffer = [None] * replay_buffer_len
     replay_end, replay_saturated = 0, False
 
-    tb_loss_agg = back_loss_agg = 0
-    samples_iter = iter(start_loader)
-    for r in tqdm(range(rounds)):
-        # Reset the handler to avoid memory leaks
+    tb_loss_acc = back_loss_acc = 0
+    metrics_list = []
+
+    print("Training...")
+    training_bar = trange(rounds)
+
+    data_iter = iter(start_loader)
+    for r in training_bar:
+        handlers = [handler_factory() for _ in range(batch_size_replay)]
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
-            start_time = time.perf_counter()
-            _, start_states, handlers = _get_start_states(samples_iter)
-            print(f"Get start states time: {time.perf_counter() - start_time}")
+            current_length = length_schedule(r)
+            batch = _get_start_states(data_iter, handlers)
+            if batch is None:
+                data_iter = iter(start_loader)
+                batch = _get_start_states(data_iter, handlers)
             # If the whole batch was invalid, quite unlikely, but possible
-            if not start_states:
+            if not batch:
                 continue
-            action_trajectories = [[] for __ in start_states]  # list of actions for each proof
-            state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
-            proof_state_history = [[node.root.proof_state] for node in
-                                   start_states]  # list of proof states for each proof
-            log_rewards = [log(0.1)] * len(start_states)
-            times = [0] * len(start_states)
-            done = [False] * len(start_states)
-            idx = 0
-            while not all([node.done for node in start_states]) and idx < MAX_TRAJ_LEN:
-                try:
-                    start_time = time.perf_counter()
-                    next_tactic_time = 0
-                    for _ in range(search_time):
-                        if all(node.done for node in start_states):
-                            print(f"Breaking after {_} steps!")
-                            break
-                        currents = []
-                        for node in start_states:
-                            if node.done:
-                                continue
-                            current = node.select()
-                            assert not current.has_been_expanded
-                            assert not current.branch_is_done
-                            currents.append(current)
-                        end_states = [current.proof_state for current in currents]
-                        histories = [current.previous_states for current in currents]
-                        tactic_start_time = time.perf_counter()
-                        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                            tactic_strings, _, _ = policy.next_tactics_int(end_states, max_retries, None, histories,temperature=1)
-                        next_tactic_time += time.perf_counter() - tactic_start_time
-                        current_handlers = [handlers[node_idx] for node_idx in range(len(start_states)) if not start_states[node_idx].done]
-                        proven, invalid, indices, goals, times_current = _envs_expand(current_handlers, tactic_strings,
-                                                  [[current.proof_state_idx] * len(tactic_strings[current_idx]) for current_idx, current in enumerate(currents)],)
-                        current_idx = 0
-                        print("Tactic strings", tactic_strings)
-                        print("Proven, invalid etc", proven, invalid, indices, goals, times_current)
-                        for i, node in enumerate(start_states):
-                            if node.done:
-                                continue
-                            rewards = _compute_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx])
-                            # Only passes on valid tactics to expand, we might want to change this
-                            tactics = [t for t, p in zip(tactic_strings[current_idx], invalid) if not p]
-                            goals_node = [g for g, p in zip(goals[current_idx], invalid) if not p]
-                            times_current_node = [t for t, p in zip(times_current[current_idx], invalid) if not p]
-                            indices_node = [index for index, p in zip(indices[current_idx], invalid) if not p]
-                            rewards = [r for r, p in zip(rewards, invalid) if not p]
-                            currents[current_idx].expand(tactics, goals_node, times_current_node, rewards, indices_node)
-                            if any(proven[current_idx]):
-                                node.done = True
-                                node.solved = True
-                                node.last_tactic = tactic_strings[current_idx][proven[current_idx].index(True)]
-                            # Edge case, if we only have invalid tactics, there is no way to continue
-                            elif node.root.branch_is_done:
-                                node.done = True
-                                node.solved = False
-                            current_idx += 1
-                except Exception as e:
-                    print(f"Error in MCTS: {e}")
-                    print(f"Node: {node.root.proof_state}")
-                    print(f"Proof: {node.proof}")
-                    print(f"Current: {current.proof_state}")
-                    print(f"Current previous states: {current.previous_states}")
-                    print(f"Current tactic strings: {tactic_strings}")
-                    print(f"Start states: {[state.root.proof_state for state in start_states]}")
-                    print(f"Current metadata: {current.metadata}")
-                    print(f"Node metadata: {node.root.metadata}")
-                    strings = []
-                    node = current
-                    while node.parent is not None:
-                        strings.append(node.parent_tactic)
-                        node = node.parent
-                    current_proof = "\n".join(reversed(strings))
-                    print(f"Current proof: {current_proof}")
-                    raise e
-                print(f"MCTS time: {time.perf_counter() - start_time}")
-                print(f"Next tactic time: {next_tactic_time}")
-                # Actual MCTS move after trying a few nodes
-                for node in start_states:
-                    node.move()
-                # Fill trajectories with the latest move, update rewards
-                prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) for node in
-                           start_states]
-                for i, node in enumerate(start_states):
-                    if done[i]: continue
-                    state_trajectories[i].append(prompts[i])
-                    # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
-                    action_trajectories[i].append(
-                        policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-                    proof_state_history[i].append(node.root.proof_state)
-                    if node.done and node.solved:
-                        done[i] = True
-                        state_trajectories[i].append([policy.successful_proof_token])
-                        log_rewards[i] = log(10) - times[i] / 5
-                    elif node.done:
-                        state_trajectories[i].append([policy.invalid_proof_token])
-                        log_rewards[i] = log(0.01)
-                        done[i] = True
-                # Update replay buffer
-                for i, t in enumerate(zip(state_trajectories, action_trajectories, log_rewards)):
-                    # Need to loose references here, otherwise we append incomplete tokens also for the trajectories
-                    state, action, reward = t[0].copy(), t[1].copy(), t[2]
-                    if not start_states[i].done:
-                        state.append([policy.incomplete_proof_token])
-                    replay_buffer[replay_end] = (state, action, reward)
-                    replay_end += 1
-                    if replay_end >= replay_buffer_len:
-                        replay_saturated = True
-                        replay_end = 0
+            _, start_states = batch
+            try:
+                state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ration = sample_mcts_trajectories(
+                    policy, start_states, handlers, search_time, device, max_retries=max_retries, max_len=current_length
+                )
+            except BrokenPipeError:
+                # Reset handlers, try again
+                print("BrokenPipeError, resetting handlers!")
+                continue
+            gc.collect()
 
-                # compute next states and rewards
-                # actions: List[Union[List[int], None]] = [None] * batch_size_replay
-                # j = 0
-                # for i in range(batch_size_replay):
-                #     if done[i]:
-                #         continue
-                #
-                #     state_trajectories[i].append(prompts[i])
-                #
-                #     tactic_times = [0] * len(tactic_strings[j])
-                #     tactic_id = 0
-                #     for tactic_id, (tactic_string, action) in enumerate(zip(tactic_strings[j], tactic_codes[j])):
-                #         tactic_times[tactic_id] = time.perf_counter()
-                #         handler.send_tactic(tactic_string, envs[i].proof_state)
-                #         response, _ = handler.receive_json()
-                #         tactic_times[tactic_id] = time.perf_counter() - tactic_times[tactic_id]
-                #
-                #         has_error = "message" in response and response["message"].startswith("Lean error")
-                #         has_error = has_error or "messages" in response and any(
-                #             m.severity == "error" for m in response["messages"])
-                #
-                #         if not has_error:  # TODO: here we just take the first one without an error. We should try something smarter like tree search
-                #             break
-                #     actions[j] = action
-                #     times[i] += tactic_times[tactic_id]
-                # if has_error:
-                #     log_rewards[i] = log(0.01)  # proof failed
-                #     done[i] = True
-                #     state_trajectories[i].append([policy.invalid_proof_token])
-                #     j += 1
-                #     continue
-                # assert isinstance(response, LeanREPLNextProofState)
-                # assert actions[j] is not None
-                # goals = response.goals
-                # action_trajectories[i] = actions[j]
-                # proof_state_history[i] = "\n".join(goals)
+            for t in zip(state_trajectories, action_trajectories, gen_log_rewards):
 
-                # if not goals:
-                #     proof_length = len(
-                #         actions[j])  # TODO: test some different reward formulations (e.g. computation time)
-                #     log_rewards[i] = log(10) + log(1 - exp(-proof_length / 5))  # proof complete
-                #     log_rewards[i] = log(10) + log(1 - exp(-times[i] / 5))
-                #     done[i] = True
-                #     state_trajectories[i].append([policy.successful_proof_token])
-                # j += 1
+                replay_buffer[replay_end] = t
+                replay_end += 1
 
-                idx += 1
+                if replay_end >= replay_buffer_len:
+                    replay_saturated = True
+                    replay_end = 0
 
-                # for t in zip(state_trajectories, action_trajectories):
-                #     if not done[i]:
-                #         t[0].append([policy.incomplete_proof_token])
-                #
-                #     replay_buffer[replay_end] = t
-                #     replay_end += 1
-                #
-                #     if replay_end >= replay_buffer_len:
-                #         replay_saturated = True
-                #         replay_end = 0
+            sampled_mean_reward = sum(map(exp, gen_log_rewards)) / len(gen_log_rewards)
+            action_lengths = sum(map(len, action_trajectories)) / len(action_trajectories)
 
             # 1. randomly sample from the replay buffer and from human trajectories
             end_idx = replay_buffer_len if replay_saturated else replay_end
@@ -614,13 +655,9 @@ def train_gflownet(
             idxs_precomputed = torch.randint(0, len(precomputed_trajectories), (batch_size_sampled,))
             trajs = [replay_buffer[i] for i in idxs_replay] + [precomputed_trajectories[i] for i in idxs_precomputed]
 
-        # TODO: check this isn't always 0
-        # print(loss.grad) if loss is not None else None
-
         # 2. call the model on each trajectory
 
-        starting_states = [states[0] for states, _, _ in trajs]
-        z_prompts = starting_states
+        z_prompts = [states[0] for states, _, _ in trajs]
         z_padded_prompts = policy.tokenizer.pad({"input_ids": z_prompts}, padding_side="right", return_tensors="pt")
         log_z_inputs = z_padded_prompts.input_ids.to(device)
         log_z_attention_mask = z_padded_prompts.attention_mask.to(device)
@@ -628,19 +665,19 @@ def train_gflownet(
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             log_z = policy.model.log_z(log_z_inputs, log_z_attention_mask)  # some duplicate computation happening here
 
-        traj_lens = torch.tensor([len(actions) for _, actions, _ in trajs], device=device)
+            traj_lens = torch.tensor([len(actions) for __, actions, __ in trajs], device=device)
 
-        # stack each trajectory so we can use torch_scatter
-        log_p_f = torch.zeros(traj_lens.sum(), device=device)
-        log_p_b = torch.zeros(traj_lens.sum(), device=device)
+            # stack each trajectory so we can use torch_scatter
+            log_p_f = torch.zeros(traj_lens.sum(), device=device)
+            log_p_b = torch.zeros(traj_lens.sum(), device=device)
 
-        idx = 0
-        # for each action, compute the sum of token log probs with prev state (p_f) and next state (p_b)
-        prev_states = [state for states, _, _ in trajs for state in states[:-1]]
-        next_states = [state for states, _, _ in trajs for state in states[1:]]
-        actions = [action for _, actions, _ in trajs for action in actions]
-        fwd_inputs = [state + action for state, action in zip(prev_states, actions, strict=True)]
-        bck_inputs = [state + action for state, action in zip(next_states, actions)]
+            idx = 0
+            # for each action, compute the sum of token log probs with prev state (p_f) and next state (p_b)
+            prev_states = [state for states, __, __ in trajs for state in states[:-1]]
+            next_states = [state for states, __, __ in trajs for state in states[1:]]
+            actions = [action for __, actions, __ in trajs for action in actions]
+            fwd_inputs = [state + action for state, action in zip(prev_states, actions, strict=True)]
+            bck_inputs = [state + action for state, action in zip(next_states, actions)]
 
         fwd_padded = policy.tokenizer.pad({"input_ids": fwd_inputs}, padding_side="right", return_tensors="pt")
         bck_padded = policy.tokenizer.pad({"input_ids": bck_inputs}, padding_side="right", return_tensors="pt")
@@ -651,89 +688,67 @@ def train_gflownet(
             # Fill log probs for tactic tokens
             fwd_log = torch.log_softmax(fwd_outputs, dim=-1)
             bck_log = torch.log_softmax(bck_outputs, dim=-1)
-            for idx in range(len(fwd_log)):
+            for idx in range(len(actions)):
                 for i in range(len(actions[idx])):
                     log_p_f[idx] += fwd_log[idx, len(prev_states[idx]) + i, actions[idx][i]]
                     log_p_b[idx] += bck_log[idx, len(next_states[idx]) + i, actions[idx][i]]
 
-        # for states, actions in trajs:
-        #     for prev_state, action, next_state in zip(states[:-1], actions, states[1:]):
-        #
-        #         fwd_input = prev_state.copy()
-        #         bck_input = next_state.copy()
-        #
-        #         with torch.autocast(device_type=device, dtype=torch.float16):
-        #             fwd_output = policy.model(torch.tensor([fwd_input + action]).to(device))[0]
-        #
-        #         for t in action:
-        #             with torch.autocast(device_type=device, dtype=torch.float16):
-        #                 # these are the forward and backward probability estimates for each token
-        #                 log_p_f[idx] += \
-        #                 policy.softmax(policy.model(torch.tensor([fwd_input]).to(device))[0] / TEMPERATURE)[-1, t].log()
-        #                 log_p_b[idx] += \
-        #                 policy.softmax(policy.model.p_b(torch.tensor([bck_input]).to(device))[0] / TEMPERATURE)[-1, t].log()
-        #
-        #             fwd_input.append(t)
-        #             bck_input.append(t)
-        #
-        #         idx += 1
+            # 3. compute TB loss with TLM backward policy
+            log_rewards_tensor = torch.tensor([reward for _, _, reward in trajs], device=device)
 
-        # 3. compute TB loss with TLM backward policy
-        log_rewards_tensor = torch.tensor([reward for _, _, reward in trajs], device=device)
+            batch_idx = torch.arange(len(traj_lens), device=device).repeat_interleave(traj_lens)
 
-        batch_idx = torch.arange(len(traj_lens), device=device).repeat_interleave(traj_lens)
+            traj_log_p_F = scatter(log_p_f, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
+            traj_log_p_B = scatter(log_p_b, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
 
-        traj_log_p_F = scatter(log_p_f, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
-        traj_log_p_B = scatter(log_p_b, batch_idx, dim=0, dim_size=len(traj_lens), reduce="sum")
+            back_loss = -traj_log_p_B.mean()
+            traj_log_p_B = traj_log_p_B.detach()
 
-        back_loss = traj_log_p_B.mean()
-        traj_log_p_B = traj_log_p_B.detach()
+            traj_diffs = (log_z + traj_log_p_F) - (log_rewards_tensor + traj_log_p_B)
+            tb_loss = huber_loss(traj_diffs).mean()
 
-        traj_diffs = (log_z + traj_log_p_F) - (log_rewards_tensor + traj_log_p_B)
-        tb_loss = huber_loss(traj_diffs).mean()
+            loss = tb_loss + back_loss
 
-        loss = tb_loss + back_loss
+            tb_loss_acc += tb_loss.item()
+            back_loss_acc += back_loss.item()
 
-        tb_loss_agg += tb_loss
-        back_loss_agg += back_loss
-
-        loss.backward()
+            training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
+            training_bar.refresh()
+        scaler.scale(loss).backward()
+        training_metrics = {"train/tb_loss": tb_loss.item(), "train/back_loss": back_loss.item(),
+                            "train/sampled_mean_reward": sampled_mean_reward,
+                            "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
+                            "train.mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
+                            "train/action_lengths": action_lengths, "train/mcts_max_length": current_length}
+        wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
+            scaler.unscale_(optimizer)
+            scaler.unscale_(z_optimizer)
             nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
-
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.step(z_optimizer)
+            scaler.update()
             optimizer.zero_grad()
-            z_optimizer.step()
             z_optimizer.zero_grad()
 
-            # TODO: replace this with the original logging code again
-            # TODO: log mean reward and proof similarity on a set of start states
-            print(tb_loss_agg, back_loss_agg)
-            tb_loss_agg = back_loss_agg = 0
-            print("Mean reward:", log_rewards_tensor.exp().mean())
+            training_metrics.update({"train/accumulated_tb_loss": tb_loss_acc,
+                                     "train/accumulated_back_loss": back_loss_acc})
+            tb_loss_acc = back_loss_acc = 0
 
-
-def get_precomputed_trajectories(start_theorems: List[Theorem], tokenizer: PreTrainedTokenizerFast) -> List[
-    Tuple[List[List[int]], List[List[int]]]]:
-    precomputed_trajectories = []
-    for thm in tqdm(start_theorems):
-        states = []
-        actions = []
-        for tactic in thm.traced_tactics:
-            new_state = tokenizer.encode(tactic.state_before)
-            # TODO: substitute this with policy.build_prompt()
-            states.append(new_state) if not states else states.append(
-                [tokenizer.added_tokens_encoder["[STATESEP]"]] + new_state)
-            actions.append(tokenizer.encode(tactic.tactic) + [tokenizer.added_tokens_encoder["[EOS]"]])
-            trajectory = (states.copy(), actions.copy())
-            precomputed_trajectories.append(trajectory)
-    return precomputed_trajectories
-
+        wandb.log(training_metrics, step=r)
+        
+        if r % eval_steps == 0:
+            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size)
+            eval_metrics.update(training_metrics)
+            metrics_list.append(eval_metrics)
+            np.save(metrics_path, np.array(metrics_list, dtype=object), allow_pickle=True)
+            policy.save(checkpoint_path)
+            wandb.log(eval_metrics, step=r)
+            wandb.log_model(checkpoint_path, name=f"model-round-{r}")
 
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
-
 
 def main():
     torch.set_float32_matmul_precision('high')
@@ -741,25 +756,45 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--n-layers", type=int, default=30)
     parser.add_argument("--d-model", type=int, default=960)
-    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--eval-batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
-    parser.add_argument("--checkpoint-path", type=str, default="model.pt")
-    parser.add_argument("--reload-checkpoint", action="store_true", default=False)
+    parser.add_argument("--load-checkpoint-path", type=str, default="model.pt")
+    parser.add_argument("--save-checkpoint-path", type=str, default="checkpoint.pt")
+    parser.add_argument("--save-metrics-path", type=str, default="metrics.npy")
+    parser.add_argument("--reload-checkpoint", action="store_true", default=True)
     parser.add_argument("--num-tactics", type=int, default=10,
                         help="Number of tactics to sample from the policy per state")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--search-time", type=int, default=100, help="Number of MCTS nodes to explore before selecting a tactic")
+    parser.add_argument("--eval-steps", type=int, default=1)
+    parser.add_argument("--eval-theorems", type=int, default=20)
+    parser.add_argument("--eval-repeats", type=int, default=5)
+    parser.add_argument("--train-on-eval", action="store_true", default=False)
+    parser.add_argument("--batch-size-precomputed", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    seed = args.seed
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
-    start_theorems = list(get_start_theorems(LEAN_DOJO_PATH / "train.json"))
+
     with TemporaryDirectory() as tmp_dir:
+        print("Getting data...")
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
                                          Path(tmp_dir))
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
-
+        eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir), repeats=args.eval_repeats, sample_count=args.eval_theorems, filter_lake=False)
+        if args.train_on_eval:
+            start_loader = DataLoader(eval_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
+                                     num_workers=args.num_workers, persistent_workers=False)
+        eval_loader = DataLoader(eval_states, batch_size=args.eval_batch_size,
+                                 collate_fn=collate_skip_none, shuffle=False, num_workers=args.num_workers)
         tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -782,11 +817,12 @@ def main():
 
         tokenizer.pad_token = "[PAD]"
 
-        checkpoint_path = Path(args.checkpoint_path)
-
-        # TODO: we should pretrain with the same state formulation as the GFlowNet implementation
+        checkpoint_path = Path(args.load_checkpoint_path)
+        print("Initializing model")
         if args.reload_checkpoint:
             policy = MambaPolicy.from_file(checkpoint_path, True, tokenizer, device)
+            d_model = policy.config.d_model
+            n_layers = policy.config.n_layer
         else:
             config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
             model = MambaLMHeadModelWrapper(config, device=device, is_gflownet=True)
@@ -803,17 +839,34 @@ def main():
         gradient_accumulation_steps = args.gradient_accumulation_steps
         batch_size = args.batch_size
         rounds = args.rounds
+        eval_steps = args.eval_steps
+        eval_repeats = args.eval_repeats
+        eval_batch_size = args.eval_batch_size
 
-        optimizer = optim.AdamW(policy.model.get_non_z_params())
-        z_optimizer = optim.AdamW(policy.model.get_z_params())
+        optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=args.lr)
+        z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
 
-        # TODO: add lr scheduler?
-        precomputed_trajectories = get_precomputed_trajectories(start_theorems, tokenizer)
+        print("Initializing precomputed trajectories")
+        precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy)
 
-        train_gflownet(policy, start_loader, precomputed_trajectories, Path("./mathlib4"), optimizer,
-                       z_optimizer, gradient_accumulation_steps, batch_size, 0, rounds, device,
+        config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
+                  "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
+                  "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
+                  "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed}
+        wandb.init(project="proofflow", config=config)
+        train_gflownet(policy, start_loader, precomputed_trajectories, handler_factory, optimizer, z_optimizer,
+                       gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
+                       eval_batch_size,
+                       eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
+                       partial(linear_schedule_length, initial_length=1, every_steps=10),
                        max_retries=args.num_tactics, search_time=args.search_time)
+
+        wandb.finish(exit_code=0)
 
 
 if __name__ == '__main__':
+
+    import warnings
+    warnings.filterwarnings("ignore", message="^.*using the `__call__` method is faster than.*$")
+
     main()

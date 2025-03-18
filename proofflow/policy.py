@@ -106,7 +106,7 @@ class Policy:
                         tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                         previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
                         temperature: float = 0.0, max_new_tokens: int = 20) -> \
-                            Tuple[Union[List[str], str], Union[List[List[int]], List[int]], Union[List[int], int]]:
+                            Tuple[Union[List[str], str], Union[List[List[int]], List[int]], Union[List[List[int]], List[int]]]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
         Additionally, return the tokenization and prompts generated.
 

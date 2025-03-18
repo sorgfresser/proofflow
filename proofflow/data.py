@@ -303,13 +303,22 @@ def parse_json(json_path: Path) -> Generator[Theorem, None, None]:
 
 
 class TheoremDataset(Dataset):
-    def __init__(self, json_path: Path):
+    def __init__(self, json_path: Path, sample_count: int = -1, filter_lake: bool = True):
         self.json_path = json_path
         self.thms = list(parse_json(json_path))
+        if sample_count > 0:
+            self.thms = self.thms[:sample_count]
+        print("Initial length:", len(self.thms))
         # Filter to only theorems with traced tactics
         self.thms = list(filter(lambda thm: thm.traced_tactics, self.thms))
         # Filter to not include .lake files
-        self.thms = list(filter(lambda thm: not ".lake" in thm.file_path, self.thms))
+        if filter_lake:
+            self.thms = list(filter(lambda thm: not ".lake" in thm.file_path, self.thms))
+        # Filter short
+        print("Filtering from samples:", len(self.thms))
+        self._filter_length(5_000)
+        print("Filtering to samples:", len(self.thms))
+
 
     def __len__(self):
         return len(self.thms)
@@ -317,12 +326,16 @@ class TheoremDataset(Dataset):
     def __getitem__(self, item) -> Theorem:
         return self.thms[item]
 
+    def _filter_length(self, length: int) -> None:
+        self.thms = [thm for thm in self.thms if all(len(sample.proof_state) + len(sample.tactic) + sum(
+            len(tac) for tac in sample.tactics_so_far) + sum(
+            len(state) for state in sample.proof_states_so_far) < length for sample in thm.to_samples())]
+
 
 class TrainSampleDataset(TheoremDataset):
-    def __init__(self, json_path: Path):
-        super().__init__(json_path)
+    def __init__(self, json_path: Path, sample_count: int = -1, filter_lake: bool = True):
+        super().__init__(json_path, sample_count, filter_lake)
         self.samples = [sample for thm in self.thms for sample in thm.to_samples()]
-        self._filter_length(20_000)
 
     def __len__(self):
         return len(self.samples)
@@ -330,24 +343,20 @@ class TrainSampleDataset(TheoremDataset):
     def __getitem__(self, item) -> TrainingSample:
         return self.samples[item]
 
-    def _filter_length(self, length: int) -> None:
-        self.samples = [sample for sample in self.samples if len(sample.proof_state) + len(sample.tactic) + sum(
-            len(tac) for tac in sample.tactics_so_far) + sum(
-            len(state) for state in sample.proof_states_so_far) < length]
-        # 48114 if filtered to 20_000, so we are missing round about 2000 batches till the full 50163
-
 
 class ProofStateDataset(TheoremDataset):
-    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path):
-        super().__init__(json_path)
+    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path, repeats: int = 1, sample_count: int = -1, filter_lake: bool = True):
+        super().__init__(json_path, sample_count, filter_lake)
         self.handler_factory = handler_factory
         self.repo_path = repo_path
         self.tmp_dir = tmp_dir
+        self.repeats = repeats
 
     def __len__(self):
-        return len(self.thms)
+        return len(self.thms) * self.repeats
 
     def __getitem__(self, item) -> Optional[Tuple[Theorem, Path]]:
+        item = item // self.repeats
         thm = super().__getitem__(item)
         handler = self.handler_factory()
         try:
@@ -357,7 +366,7 @@ class ProofStateDataset(TheoremDataset):
             assert isinstance(pickled, LeanREPLNextProofState)
         except UnknownMetaVariableError:
             return None
-        return thm,  pickle_path
+        return thm, pickle_path
 
 
 if __name__ == '__main__':
