@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from math import exp, log
 import time
 from typing import Tuple, List, Union, Dict, Any, Iterator, Optional, Callable
-import numpy as np
+from functools import partial
 from torch import nn
 import torch
 from torch_scatter import scatter
@@ -22,6 +22,8 @@ from tqdm import trange, tqdm
 from argparse import ArgumentParser
 import asyncio
 import wandb
+import numpy as np
+import random
 from transformers import AutoModel, AutoTokenizer
 
 
@@ -564,6 +566,11 @@ def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[
     }
     return metrics
 
+def linear_schedule_length(round, initial_length: int = 1, every_steps: int = 1) -> int:
+    steps = round // every_steps
+    return steps + initial_length
+
+
 def train_gflownet(
         policy: Policy,
         start_loader: DataLoader,
@@ -583,6 +590,7 @@ def train_gflownet(
         device: str,
         checkpoint_path: Path,
         metrics_path: Path,
+        length_schedule: Callable[[int], int],
         replay_buffer_len: int = 1_000,
         max_retries: int = 5,
         search_time: int = 100
@@ -605,14 +613,12 @@ def train_gflownet(
     print("Training...")
     training_bar = trange(rounds)
 
-    #handlers = [handler_factory() for _ in range(batch_size_replay)]
-
     data_iter = iter(start_loader)
     for r in training_bar:
         handlers = [handler_factory() for _ in range(batch_size_replay)]
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
-
+            current_length = length_schedule(r)
             batch = _get_start_states(data_iter, handlers)
             if batch is None:
                 data_iter = iter(start_loader)
@@ -623,7 +629,7 @@ def train_gflownet(
             _, start_states = batch
             try:
                 state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ration = sample_mcts_trajectories(
-                    policy, start_states, handlers, search_time, device, max_retries=max_retries
+                    policy, start_states, handlers, search_time, device, max_retries=max_retries, max_len=current_length
                 )
             except BrokenPipeError:
                 # Reset handlers, try again
@@ -713,7 +719,7 @@ def train_gflownet(
                             "train/sampled_mean_reward": sampled_mean_reward,
                             "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
                             "train.mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
-                            "train/action_lengths": action_lengths}
+                            "train/action_lengths": action_lengths, "train/mcts_max_length": current_length}
         wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
@@ -768,7 +774,12 @@ def main():
     parser.add_argument("--train-on-eval", action="store_true", default=False)
     parser.add_argument("--batch-size-precomputed", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    seed = args.seed
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
 
@@ -847,6 +858,7 @@ def main():
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
                        eval_batch_size,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
+                       partial(linear_schedule_length, initial_length=1, every_steps=10),
                        max_retries=args.num_tactics, search_time=args.search_time)
 
         wandb.finish(exit_code=0)
