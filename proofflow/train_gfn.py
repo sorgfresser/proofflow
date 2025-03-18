@@ -276,6 +276,7 @@ def postprocess_tactic(tactic: str):
     original = tactic
     tactic = re.sub(period_regex, r"\g<1>.\g<4>", original)
     while original != tactic:
+        original = tactic
         tactic = re.sub(period_regex, r"\g<1>.\g<4>", original)
     return tactic
 
