@@ -1,6 +1,7 @@
 import gc
 from dataclasses import dataclass
 from math import exp, log
+from re import S
 import time
 from typing import Tuple, List, Union, Dict, Any, Iterator, Optional, Callable
 import numpy as np
@@ -21,7 +22,7 @@ from mamba_ssm.models.config_mamba import MambaConfig
 from tqdm import trange, tqdm
 from argparse import ArgumentParser
 import asyncio
-import wandb
+#import wandb
 
 
 class ModelBlock(nn.Module):
@@ -323,6 +324,35 @@ def _envs_expand(
     proven, invalid, indices, goals, times = loop.run_until_complete(_process_all_envs(handlers, tactics, proof_state_indices))
     return proven, invalid, indices, goals, times
 
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+rp_tokenizer = AutoTokenizer.from_pretrained("kaiyuy/leandojo-lean4-retriever-tacgen-byt5-small")
+rp_model = AutoModelForSeq2SeqLM.from_pretrained("kaiyuy/leandojo-lean4-retriever-tacgen-byt5-small")
+
+@torch.no_grad()
+def _compute_log_rewards_upd(proof_states: List[List[str]], actions: List[List[str]]) -> List[float]:
+    rewards = []
+    for ps, a in zip(proof_states, actions, strict=True):
+        log_prob = 0
+        if len(ps) != len(a):
+            print("ne", ps, a)
+        for state, action in zip(ps, a):
+
+            tokenized_input = rp_tokenizer(state, return_tensors="pt", max_length=2300, truncation=True)
+            tokenized_action = rp_tokenizer(action, return_tensors="pt", max_length=2300, truncation=True)
+
+            string = tokenized_input.input_ids
+
+            for t in tokenized_action.input_ids[0]:
+
+                outputs = rp_model(input_ids=tokenized_input.input_ids, decoder_input_ids=tokenized_input.input_ids)
+
+                log_prob += torch.nn.functional.log_softmax(outputs.logits, dim=-1)[0, -1, t]
+
+                string = torch.cat((string, torch.tensor([[t]])), dim=1)
+
+        rewards.append(log_prob)
+
+    return rewards
 
 def _compute_log_rewards(proven: List[bool], invalid: List[bool], times: List[float], length: int) -> List[float]:
     rewards = []
@@ -350,6 +380,8 @@ def sample_mcts_trajectories(
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
     done = [False] * len(start_states)
     log_rewards = [0] * len(start_states)
+    acts = [[] for __ in start_states]
+    sats = [[] for __ in start_states]
 
     idx = 0
     nodes_proven = 0
@@ -390,8 +422,23 @@ def sample_mcts_trajectories(
 
                     if node.done:
                         continue
+                    
+                    previous_tactics = []
 
-                    rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
+                    x = currents[current_idx]
+                    while x is not None:
+                        previous_tactics.append(x.parent_tactic)
+                        x = x.parent
+                    
+                    previous_tactics = previous_tactics[::-1][1:]
+
+                    st = [histories[current_idx] + [end_states[current_idx]]] * len(tactic_strings[current_idx])
+                    ac = [previous_tactics + [s] for s in tactic_strings[current_idx]]
+
+                    # there is something wrong with these states and actions but who cares
+                    rewards = _compute_log_rewards_upd(st, ac)
+
+                    #rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
                     # Only passes on valid tactics to expand, we might want to change this
 
                     tactics = [t for t, p in zip(tactic_strings[current_idx], invalid[current_idx], strict=True) if not p]
@@ -447,7 +494,9 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            log_rewards[i] = _compute_log_rewards([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1)[0]
+            acts[i].append(node.last_tactic)
+            sats[i].append(node.root.proof_state)
+            log_rewards[i] = _compute_log_rewards_upd([sats[i]], [acts[i]])[0]
             if node.done:
                 end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
                 state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
@@ -504,7 +553,7 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
         gfn_states.append(
             self.policy._build_prompt(self.tokenizer.decode([self.policy.successful_proof_token]), None, proof_states))
         complete = thm.traced_tactics[-1].state_after == "no goals"
-        log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
+        log_reward: float = _compute_log_rewards_upd([complete], [not complete], [0], len(gfn_actions))[0]
         return gfn_states, gfn_actions, log_reward
 
 class BackgroundDataLoader:
@@ -548,6 +597,7 @@ class BackgroundDataLoader:
 
 def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLAsyncHandler],
              device: str, eval_repeats: int, search_time: int, max_retries: int) -> dict[str, float]:
+    return {}
     bg_eval_loader = BackgroundDataLoader(eval_loader, handler_factory)
     loop.run_until_complete(bg_eval_loader.start_background())
     similarities = []
@@ -614,7 +664,8 @@ def train_gflownet(
     replay_buffer = [None] * replay_buffer_len
     replay_end, replay_saturated = 0, False
 
-    tb_loss_acc = back_loss_acc = 0
+    r_out = []
+    tb_loss_acc = back_loss_acc = r_acc = log_p_f_acc = log_p_b_acc = z_acc = action_lengths_acc = 0
     metrics_list = []
 
     loop = asyncio.get_event_loop()
@@ -625,7 +676,7 @@ def train_gflownet(
     loop.run_until_complete(bg_loader.start_background())
 
     print("Training...")
-    training_bar = trange(rounds)
+    training_bar = range(rounds)
     for r in training_bar:
 
         with torch.no_grad():
@@ -655,6 +706,9 @@ def train_gflownet(
                 if replay_end >= replay_buffer_len:
                     replay_saturated = True
                     replay_end = 0
+
+            sampled_mean_reward = sum(map(exp, gen_log_rewards)) / len(gen_log_rewards)
+            action_lengths = sum(map(len, action_trajectories)) / len(action_trajectories)
 
             # 1. randomly sample from the replay buffer and from human trajectories
             end_idx = replay_buffer_len if replay_saturated else replay_end
@@ -716,19 +770,26 @@ def train_gflownet(
 
             loss = tb_loss + back_loss
 
-            tb_loss_acc += tb_loss.item()
-            back_loss_acc += back_loss.item()
+            #training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
+            #training_bar.refresh()
 
-            training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
-            training_bar.refresh()
-        action_lengths = sum(map(len, actions), 0) / len(actions)
+        tb_loss_acc += tb_loss.item()
+        back_loss_acc += back_loss.item()
+        r_acc += sampled_mean_reward / gradient_accumulation_steps
+        log_p_f_acc += log_p_f.mean().item() / gradient_accumulation_steps
+        log_p_b_acc += log_p_b.mean().item() / gradient_accumulation_steps
+        z_acc += log_z.exp().mean().item() / gradient_accumulation_steps
+        action_lengths_acc += action_lengths / gradient_accumulation_steps
+
+        print(sampled_mean_reward)
+
         scaler.scale(loss).backward()
         training_metrics = {"train/tb_loss": tb_loss.item(), "train/back_loss": back_loss.item(),
-                            "train/sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
+                            "train/sampled_mean_reward": sampled_mean_reward,
                             "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
                             "train.mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
                             "train/action_lengths": action_lengths}
-        wandb.log(training_metrics, step=r)
+        #wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
             scaler.unscale_(optimizer)
@@ -742,9 +803,12 @@ def train_gflownet(
 
             training_metrics.update({"train/accumulated_tb_loss": tb_loss_acc,
                                      "train/accumulated_back_loss": back_loss_acc})
-            tb_loss_acc = back_loss_acc = 0
+            print(tb_loss_acc, back_loss_acc, r_acc, log_p_f_acc, log_p_b_acc, z_acc, action_lengths_acc)
+            r_out.append(r_acc)
+            np.save("temp.npy", np.array(r_out))
+            tb_loss_acc = back_loss_acc = r_acc = log_p_f_acc = log_p_b_acc = z_acc = action_lengths_acc = 0
 
-        wandb.log(training_metrics, step=r)
+        #wandb.log(training_metrics, step=r)
         
         if r % eval_steps == 0:
             eval_metrics = evaluate(policy, loop, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries)
@@ -752,8 +816,8 @@ def train_gflownet(
             metrics_list.append(eval_metrics)
             np.save(metrics_path, np.array(metrics_list, dtype=object), allow_pickle=True)
             policy.save(checkpoint_path)
-            wandb.log(eval_metrics, step=r)
-            wandb.log_model(checkpoint_path, name=f"model-round-{r}")
+            #wandb.log(eval_metrics, step=r)
+            #wandb.log_model(checkpoint_path, name=f"model-round-{r}")
 
     loop.run_until_complete(bg_loader.stop())
     loop.close()
@@ -767,18 +831,18 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--n-layers", type=int, default=30)
     parser.add_argument("--d-model", type=int, default=960)
-    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--rounds", type=int, default=1_000)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--eval-batch-size", type=int, default=2)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=16)
     parser.add_argument("--load-checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--save-checkpoint-path", type=str, default="checkpoint.pt")
     parser.add_argument("--save-metrics-path", type=str, default="metrics.npy")
     parser.add_argument("--reload-checkpoint", action="store_true", default=True)
-    parser.add_argument("--num-tactics", type=int, default=10,
+    parser.add_argument("--num-tactics", type=int, default=2,
                         help="Number of tactics to sample from the policy per state")
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--search-time", type=int, default=100, help="Number of MCTS nodes to explore before selecting a tactic")
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--search-time", type=int, default=1, help="Number of MCTS nodes to explore before selecting a tactic")
     parser.add_argument("--eval-steps", type=int, default=1)
     parser.add_argument("--eval-theorems", type=int, default=20)
     parser.add_argument("--eval-repeats", type=int, default=5)
@@ -845,7 +909,7 @@ def main():
         eval_steps = args.eval_steps
         eval_repeats = args.eval_repeats
 
-        optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=1e-4)
+        optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=1e-6)
         z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
 
         print("Initializing precomputed trajectories")
@@ -855,18 +919,19 @@ def main():
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
                   "search_time": args.search_time}
-        wandb.init(project="proofflow", config=config)
+        #wandb.init(project="proofflow", config=config)
         train_gflownet(policy, start_loader, precomputed_trajectories, async_handler_factory, optimizer, z_optimizer,
-                       gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_loader,
+                       gradient_accumulation_steps, batch_size, 0, rounds, eval_steps, eval_loader,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        max_retries=args.num_tactics, search_time=args.search_time)
 
-        wandb.finish(exit_code=0)
+        #wandb.finish(exit_code=0)
 
 
 if __name__ == '__main__':
 
     import warnings
     warnings.filterwarnings("ignore", message="^.*using the `__call__` method is faster than.*$")
+    warnings.filterwarnings("ignore", message="^.*Disabling parallelism to avoid deadlocks.*$")
 
     main()
