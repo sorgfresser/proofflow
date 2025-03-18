@@ -85,11 +85,14 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
     policy.model.train()
     scaler = torch.amp.GradScaler(enabled=half_precision, device=policy.device)
     optimizer.zero_grad()
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 50)
     current_step = 0
     print(f"Saving model to {checkpoint_path}")
     policy.save(checkpoint_path)
+    current_best = 1_000_000_000
+    policy.save("modelfixedwstokenizersmallbest.pt")
     for epoch in range(epochs):
-        for batch in tqdm(data_loader):
+        for i, batch in enumerate(tqdm(data_loader)):
             with torch.amp.autocast(dtype=torch.bfloat16, enabled=half_precision, device_type=policy.device):
                 loss = policy.train_batch(batch, loss_on_prompt, tactics_so_far,
                                           proof_states_so_far=states_so_far) / gradient_accumulation_steps
@@ -100,6 +103,7 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                 nn.utils.clip_grad_norm_(policy.model.parameters(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
+                scheduler.step(epoch + i / len(data_loader))
                 optimizer.zero_grad()
             if (current_step + 1) % eval_steps == 0:
                 metrics = evaluate(policy, valid_data, eval_batch_size)
@@ -108,6 +112,9 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                 print(metrics)
                 print(f"Saving model to {checkpoint_path}")
                 policy.save(checkpoint_path)
+                if metrics["validation/perplexity"] < current_best:
+                    policy.save("modelnewestsmallbest.pt")
+                    current_best = metrics["validation/perplexity"]
             current_step += 1
         print(f"Epoch {epoch} done")
         print(f"Saving model to {checkpoint_path}")
@@ -145,7 +152,7 @@ def main():
     eval_data = TheoremDataset(LEAN_DOJO_PATH / "val.json")
     test_data = TheoremDataset(LEAN_DOJO_PATH / "test.json")
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer2")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -178,7 +185,7 @@ def main():
     eval_steps = args.eval_steps
     epochs = args.epochs
     eval_batch_size = args.eval_batch_size
-    optimizer = optim.AdamW(model.parameters())
+    optimizer = optim.AdamW(model.parameters(), lr=3e-3)
     config = {"gradient_accumulation_steps": gradient_accumulation_steps, "batch_size": batch_size, "epochs": epochs,
               "eval_steps": eval_steps, "n_layers": n_layers, "d_model": d_model, "eval_batch_size": eval_batch_size,
               "loss_on_prompt": args.loss_on_prompt, "tactics_so_far": args.tactics_so_far,

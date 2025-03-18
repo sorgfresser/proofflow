@@ -6,7 +6,7 @@ from tokenizers.trainers import BpeTrainer
 from tokenizers import Tokenizer, Regex
 from tokenizers.models import BPE
 from proofflow.data import TheoremDataset, LEAN_DOJO_PATH, TrainSampleDataset
-from tokenizers.pre_tokenizers import PreTokenizer, Whitespace, Punctuation, Sequence
+from tokenizers.pre_tokenizers import PreTokenizer, WhitespaceSplit, Punctuation, Sequence
 from pathlib import Path
 from transformers import PreTrainedTokenizerFast
 
@@ -32,7 +32,7 @@ if __name__ == '__main__':
     # We split on whitespaces or periods, as periods are used frequently in imports
     # For example, we do not want multiple namespaces in one token
     # tokenizer.pre_tokenizer = Split(Regex(r"\w+|[^\w\s]+|\."), behavior="isolated")
-    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer.pre_tokenizer = WhitespaceSplit()
     # tokenizer.pre_tokenizer = Sequence([Punctuation(), Whitespace()])
     # mathlib_path = Path("../mathlib4")
     # files = [str(file.resolve()) for file in mathlib_path.glob("**/*.lean")]
@@ -45,4 +45,5 @@ if __name__ == '__main__':
 
     transformers_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
     transformers_tokenizer.add_special_tokens({"eos_token": "[EOS]", "pad_token": "[PAD]", "unk_token": "[UNK]", "sep_token": "[SEP]"})
-    transformers_tokenizer.save_pretrained("lean_tokenizer")
+    transformers_tokenizer.save_pretrained("lean_tokenizer2")
+
