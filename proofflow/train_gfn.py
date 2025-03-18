@@ -22,6 +22,8 @@ from tqdm import trange, tqdm
 from argparse import ArgumentParser
 import asyncio
 import wandb
+from transformers import AutoModel, AutoTokenizer
+
 
 
 class ModelBlock(nn.Module):
@@ -319,6 +321,34 @@ def _compute_log_rewards(proven: List[bool], invalid: List[bool], times: List[fl
             rewards.append(log(0.1) + log(1 - exp(-length / 5)))
     return rewards
 
+critic_model = AutoModel.from_pretrained(
+    "internlm/internlm2_5-step-prover-critic",
+    device_map="cpu",
+    torch_dtype=torch.float16,
+    trust_remote_code=True,
+)
+critic_tokenizer = AutoTokenizer.from_pretrained("internlm/internlm2_5-step-prover-critic", trust_remote_code=True)
+
+
+def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[float], length: int, proof_state: List[str]) -> List[float]:
+    rewards = []
+    for p, i, _t in zip(proven, invalid, times, proof_state):
+        chat = [
+            {"role": "user", "content": "Which state is closer to 'no goals'?"},
+            {"role": "assistant", "content": f"{proof_state}"},
+        ]
+        if i:
+            rewards.append(log(0.01))
+        elif p:  # proof complete
+            # rewards.append(1 + 15*exp(-t))  # compute time does not work with precomputed proofs
+            rewards.append(log(10) + log(1 - exp(-length / 5)))
+        else:  # ongoing = small reward
+            # rewards.append(0.1 + 0.25*exp(-t))  # compute time does not work with precomputed proofs
+            score1 = critic_model.get_score(tokenizer, chat_1)
+            rewards.append(log(score1) + log(1 - exp(-length / 5)))
+    return rewards
+
+
 def sample_mcts_trajectories(
         policy: Policy,
         start_states: List[MCTS],
@@ -430,7 +460,7 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            log_rewards[i] = _compute_log_rewards([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1)[0]
+            log_rewards[i] = _compute_log_internlm([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1, [node.root.proof_state])[0]
             if node.done:
                 end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
                 state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
