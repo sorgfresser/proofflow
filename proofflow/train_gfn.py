@@ -215,6 +215,7 @@ class Node:
 class MCTS:
     def __init__(self, root: Node):
         self.root = root
+        self.metadata = root.metadata
         self.proof = ""
         self.time = 0.0
         self.step_count = 0
@@ -245,7 +246,7 @@ class MCTS:
         return node
 
 
-def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler]) -> \
+def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler], num_repeats: int = 1) -> \
         Optional[Tuple[List[LeanREPLProofState], List[MCTS]]]:
     try:
         batch = next(start_loader)
@@ -253,10 +254,10 @@ def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler]) -
         return None
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
     # Will be thm[0] k times, then thm 1 k times etc.
-    thms = [thm for thm in thms]
-    paths = [path for path in paths]
+    thms = [thm for thm in thms for _ in range(num_repeats)]
+    paths = [path for path in paths for _ in range(num_repeats)]
     # Start all REPLs
-    proof_states= [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
+    proof_states= [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths, strict=True)]
     # Gather
     proof_states = [proof_state for proof_state, env in proof_states]
     # Unlink them all, not needed anymore
@@ -499,10 +500,13 @@ def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
 
 
 class PrecomputedTrajectoryDataset(TheoremDataset):
-    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy):
+    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy, create_lookup: bool = False):
         super().__init__(data_path)
         self.tokenizer = tokenizer
         self.policy = policy
+        self._lookup = None
+        if create_lookup:
+            self._lookup = {thm.full_name: idx for idx, thm in enumerate(self.thms)}
 
     def __getitem__(self, item: int) -> Tuple[List[List[int]], List[List[int]], float]:
         thm = super().__getitem__(item)
@@ -518,6 +522,10 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
         complete = thm.traced_tactics[-1].state_after == "no goals"
         log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
         return gfn_states, gfn_actions, log_reward
+
+    def lookup(self, theorem_name: str) -> int:
+        assert self._lookup
+        return self._lookup[theorem_name]
 
 
 
@@ -593,7 +601,8 @@ def train_gflownet(
         length_schedule: Callable[[int], int],
         replay_buffer_len: int = 1_000,
         max_retries: int = 5,
-        search_time: int = 100
+        search_time: int = 100,
+        train_repeats: int = 1
 ):
 
     policy.model.train()
@@ -615,14 +624,14 @@ def train_gflownet(
 
     data_iter = iter(start_loader)
     for r in training_bar:
-        handlers = [handler_factory() for _ in range(batch_size_replay)]
+        handlers = [handler_factory() for _ in range(batch_size_replay * train_repeats)]
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
             current_length = length_schedule(r)
-            batch = _get_start_states(data_iter, handlers)
+            batch = _get_start_states(data_iter, handlers, num_repeats=train_repeats)
             if batch is None:
                 data_iter = iter(start_loader)
-                batch = _get_start_states(data_iter, handlers)
+                batch = _get_start_states(data_iter, handlers, num_repeats=train_repeats)
             # If the whole batch was invalid, quite unlikely, but possible
             if not batch:
                 continue
@@ -637,24 +646,25 @@ def train_gflownet(
                 continue
             gc.collect()
 
-            for t in zip(state_trajectories, action_trajectories, gen_log_rewards):
-
-                replay_buffer[replay_end] = t
-                replay_end += 1
-
-                if replay_end >= replay_buffer_len:
-                    replay_saturated = True
-                    replay_end = 0
+            # for t in zip(state_trajectories, action_trajectories, gen_log_rewards):
+            #
+            #     replay_buffer[replay_end] = t
+            #     replay_end += 1
+            #
+            #     if replay_end >= replay_buffer_len:
+            #         replay_saturated = True
+            #         replay_end = 0
 
             sampled_mean_reward = sum(map(exp, gen_log_rewards)) / len(gen_log_rewards)
             action_lengths = sum(map(len, action_trajectories)) / len(action_trajectories)
 
             # 1. randomly sample from the replay buffer and from human trajectories
-            end_idx = replay_buffer_len if replay_saturated else replay_end
-            idxs_replay = torch.randint(0, end_idx, (batch_size_replay,))
-            idxs_precomputed = torch.randint(0, len(precomputed_trajectories), (batch_size_sampled,))
-            trajs = [replay_buffer[i] for i in idxs_replay] + [precomputed_trajectories[i] for i in idxs_precomputed]
-
+            # end_idx = replay_buffer_len if replay_saturated else replay_end
+            # idxs_replay = torch.randint(0, end_idx, (batch_size_replay,))
+            # idxs_precomputed = torch.randint(0, len(precomputed_trajectories), (batch_size_sampled,))
+            # trajs = [replay_buffer[i] for i in idxs_replay] + [precomputed_trajectories[i] for i in idxs_precomputed]
+            idxs_precomputed = set([precomputed_trajectories.lookup(state.metadata["theoremname"]) for state in start_states])
+            trajs = list(zip(state_trajectories, action_trajectories, gen_log_rewards)) + [precomputed_trajectories[i] for i in idxs_precomputed]
         # 2. call the model on each trajectory
 
         z_prompts = [states[0] for states, _, _ in trajs]
