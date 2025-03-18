@@ -857,7 +857,10 @@ def main():
         z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
 
         print("Initializing precomputed trajectories")
-        precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy)
+        if args.train_on_eval:
+            precomputed_trajectories = PrecomputedTrajectoryDataset(Path("./proof_flow_theorems.json"), tokenizer, policy, create_lookup=True)
+        else:
+            precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy, create_lookup=True)
 
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
@@ -869,7 +872,7 @@ def main():
                        eval_batch_size,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        partial(linear_schedule_length, initial_length=1, every_steps=10),
-                       max_retries=args.num_tactics, search_time=args.search_time)
+                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=3)
 
         wandb.finish(exit_code=0)
 
