@@ -257,7 +257,7 @@ def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler], n
     thms = [thm for thm in thms for _ in range(num_repeats)]
     paths = [path for path in paths for _ in range(num_repeats)]
     # Start all REPLs
-    proof_states= [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths, strict=True)]
+    proof_states= [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
     # Gather
     proof_states = [proof_state for proof_state, env in proof_states]
     # Unlink them all, not needed anymore
