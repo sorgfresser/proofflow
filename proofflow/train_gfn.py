@@ -801,19 +801,19 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--n-layers", type=int, default=30)
     parser.add_argument("--d-model", type=int, default=960)
-    parser.add_argument("--rounds", type=int, default=1_000)
+    parser.add_argument("--rounds", type=int, default=3_000)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--eval-batch-size", type=int, default=4)
+    parser.add_argument("--eval-batch-size", type=int, default=32)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--load-checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--save-checkpoint-path", type=str, default="checkpoint.pt")
     parser.add_argument("--save-metrics-path", type=str, default="metrics.npy")
     parser.add_argument("--reload-checkpoint", action="store_true", default=True)
-    parser.add_argument("--num-tactics", type=int, default=10,
+    parser.add_argument("--num-tactics", type=int, default=100,
                         help="Number of tactics to sample from the policy per state")
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--search-time", type=int, default=3, help="Number of MCTS nodes to explore before selecting a tactic")
-    parser.add_argument("--eval-steps", type=int, default=100)
+    parser.add_argument("--num-workers", type=int, default=32)
+    parser.add_argument("--search-time", type=int, default=5, help="Number of MCTS nodes to explore before selecting a tactic")
+    parser.add_argument("--eval-steps", type=int, default=50)
     parser.add_argument("--eval-theorems", type=int, default=20)
     parser.add_argument("--eval-repeats", type=int, default=1)
     parser.add_argument("--train-repeats", type=int, default=127)
@@ -821,7 +821,7 @@ def main():
     parser.add_argument("--batch-size-precomputed", type=int, default=2)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--temperature", type=float, default=0.6)
     args = parser.parse_args()
     seed = args.seed
     torch.manual_seed(seed)
@@ -885,7 +885,7 @@ def main():
 
         gradient_accumulation_steps = args.gradient_accumulation_steps
         batch_size = args.batch_size
-        rounds = args.rounds
+        rounds = args.rounds * args.gradient_accumulation_steps
         eval_steps = args.eval_steps
         eval_repeats = args.eval_repeats
         eval_batch_size = args.eval_batch_size
