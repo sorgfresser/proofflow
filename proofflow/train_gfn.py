@@ -852,7 +852,7 @@ def main():
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
-                  "search_time": args.search_time, "eval_batch_size": eval_batch_size}
+                  "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed}
         wandb.init(project="proofflow", config=config)
         train_gflownet(policy, start_loader, precomputed_trajectories, handler_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
