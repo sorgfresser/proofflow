@@ -344,7 +344,7 @@ def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[f
             rewards.append(log(10) + log(1 - exp(-length / 5)))
         else:  # ongoing = small reward
             # rewards.append(0.1 + 0.25*exp(-t))  # compute time does not work with precomputed proofs
-            score1 = critic_model.get_score(tokenizer, chat_1)
+            score1 = critic_model.get_score(critic_tokenizer, chat)
             rewards.append(log(score1) + log(1 - exp(-length / 5)))
     return rewards
 
