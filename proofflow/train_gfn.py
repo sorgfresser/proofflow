@@ -241,21 +241,19 @@ class MCTS:
         return node
 
 
-async def _get_start_states(start_loader: Iterator, handler_factory: Callable[[], LeanREPLAsyncHandler], repeats: int = 1) -> \
-        Optional[Tuple[List[LeanREPLProofState], List[MCTS], List[LeanREPLAsyncHandler]]]:
+def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler]) -> \
+        Optional[Tuple[List[LeanREPLProofState], List[MCTS]]]:
     try:
         batch = next(start_loader)
     except StopIteration:
         return None
     thms, paths = [elem[0] for elem in batch], [elem[1] for elem in batch]
     # Will be thm[0] k times, then thm 1 k times etc.
-    thms = [thm for thm in thms for _ in range(repeats)]
-    paths = [path for path in paths for _ in range(repeats)]
-    handlers = [handler_factory() for _ in paths]
+    thms = [thm for thm in thms]
+    paths = [path for path in paths]
     # Start all REPLs
-    proof_state_futures = [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
+    proof_states= [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
     # Gather
-    proof_states = await asyncio.gather(*proof_state_futures)
     proof_states = [proof_state for proof_state, env in proof_states]
     # Unlink them all, not needed anymore
     assert all(path.exists() for path in paths)
@@ -265,62 +263,46 @@ async def _get_start_states(start_loader: Iterator, handler_factory: Callable[[]
     nodes = [Node(proof_state.goals[0], proof_state_idx=proof_state.proof_state,
                   metadata={"theoremname": thm.full_name, "theoremfile": thm.file_path}) for proof_state, thm in
              zip(proof_states, thms)]
-    return proof_states, [MCTS(node) for node in nodes], handlers
-
-
-async def _process_single_env(handler: LeanREPLAsyncHandler, tactics: List[str], proof_state_indices: List[int],
-                              proven: List[bool], invalid: List[bool], indices: List[Optional[int]],
-                              goals: List[Optional[str]], times: List[float]):
-    assert len(proven) == len(invalid) == len(indices) == len(goals) == 0
-    for tactic, proof_state_idx in zip(tactics, proof_state_indices, strict=True):
-        curr_time = time.perf_counter()
-        await handler.send_tactic(tactic, proof_state_idx)
-        response, _ = await handler.receive_json()
-        times.append(time.perf_counter() - curr_time)
-        has_error = "message" in response and response["message"].startswith("Lean error")
-        has_error = has_error or "messages" in response and any(msg.severity == "error" for msg in response["messages"])
-        has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(msg.severity == "error" for msg in response.messages))
-        if has_error:
-            invalid.append(True)
-            proven.append(False)
-            indices.append(None)
-            goals.append(None)
-            continue
-        assert isinstance(response, LeanREPLNextProofState)
-        proven.append(not response.goals)
-        invalid.append(False)
-        if not response.goals:
-            goals.append(None)
-        else:
-            goals.append(response.goals[0])  # only need one goal, it has all information
-        indices.append(response.proof_state)
-
-async def _process_all_envs(handlers: List[LeanREPLAsyncHandler], tactics: List[List[str]],
-                            proof_state_indices: List[List[int]]):
-    proven = [[] for _ in handlers]
-    invalid = [[] for _ in handlers]
-    indices = [[] for _ in handlers]
-    goals = [[] for _ in handlers]
-    times = [[] for _ in handlers]
-    tasks = []
-    for i in range(len(handlers)):
-        tasks.append(
-            _process_single_env(handlers[i], tactics[i], proof_state_indices[i], proven[i], invalid[i], indices[i],
-                                goals[i], times[i]))
-    await asyncio.gather(*tasks)
-    return proven, invalid, indices, goals, times
-
+    return proof_states, [MCTS(node) for node in nodes]
 
 def _envs_expand(
-        handlers: list[LeanREPLAsyncHandler],
+        handlers: list[LeanREPLHandler],
         tactics: list[list[str]],
         proof_state_indices: list[list[int]]
 ):
     """Sends one tactic at a time per handler"""
     assert len(handlers) == len(tactics) == len(proof_state_indices)
-    loop = asyncio.get_event_loop()
-    assert not loop.is_closed()
-    proven, invalid, indices, goals, times = loop.run_until_complete(_process_all_envs(handlers, tactics, proof_state_indices))
+    proven = [[] for _ in handlers]
+    invalid = [[] for _ in handlers]
+    indices = [[] for _ in handlers]
+    goals = [[] for _ in handlers]
+    times = [[] for _ in handlers]
+    for i in range(len(handlers)):
+        for tactic, proof_state_idx in zip(tactics[i], proof_state_indices[i], strict=True):
+            handler = handlers[i]
+            start_time = time.perf_counter()
+            handler.send_tactic(tactic, proof_state_idx)
+            response, _ = handler.receive_json()
+            times[i].append(time.perf_counter() - start_time)
+            has_error = "message" in response and response["message"].startswith("Lean error")
+            has_error = has_error or "messages" in response and any(
+                msg.severity == "error" for msg in response["messages"])
+            has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(
+                msg.severity == "error" for msg in response.messages))
+            if has_error:
+                invalid[i].append(True)
+                proven[i].append(False)
+                indices[i].append(None)
+                goals[i].append(None)
+                continue
+            assert isinstance(response, LeanREPLNextProofState)
+            proven[i].append(not response.goals)
+            invalid[i].append(False)
+            if not response.goals:
+                goals[i].append(None)
+            else:
+                goals[i].append(response.goals[0])  # only need one goal, it has all information
+            indices[i].append(response.proof_state)
     return proven, invalid, indices, goals, times
 
 
@@ -340,7 +322,7 @@ def _compute_log_rewards(proven: List[bool], invalid: List[bool], times: List[fl
 def sample_mcts_trajectories(
         policy: Policy,
         start_states: List[MCTS],
-        handlers: List[LeanREPLAsyncHandler],
+        handlers: List[LeanREPLHandler],
         search_time: int,
         device: str,
         max_len: int = 10,
@@ -414,7 +396,8 @@ def sample_mcts_trajectories(
                         node.solved = False
                         node.last_tactic = tactic_strings[current_idx][0] # all of them are unproven, just take 0
                     current_idx += 1
-
+        except BrokenPipeError as e:
+            raise e
         except Exception as e:
             print(f"Error in MCTS: {e}")
             print(f"Node: {node.root.proof_state}")
@@ -460,9 +443,6 @@ def sample_mcts_trajectories(
             t.append(t[-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
     assert all(len(state) == len(action) + 1 for state, action in zip(state_trajectories, action_trajectories, strict=True))
 
-    close_futures = [handler.close() for handler in handlers]
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(asyncio.gather(*close_futures))
     return state_trajectories, action_trajectories, log_rewards, nodes_proven, float(valid_child_count) / expanded_node_count
 
 
@@ -507,60 +487,34 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
         log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
         return gfn_states, gfn_actions, log_reward
 
-class BackgroundDataLoader:
-    """
-    Wraps an existing PyTorch DataLoader in a background thread
-    that prefetches batches and places them into a queue.
-    """
 
-    def __init__(self, dataloader: DataLoader, handler_factory: Callable[[], LeanREPLAsyncHandler],
-                 max_prefetch: int = 2):
-        self.dataloader_iter = iter(dataloader)
-        self.queue: asyncio.Queue[Tuple[List[MCTS], List[LeanREPLAsyncHandler]]] = asyncio.Queue(maxsize=max_prefetch)
-        self.stop_flag = False
-        self.handler_factory = handler_factory
 
-    async def _run_async(self):
-        """The async producer coroutine that fetches data and puts it into the queue."""
-        while not self.stop_flag:
-            result = await _get_start_states(self.dataloader_iter, self.handler_factory)
-            if result is None:
-                break
-            _, start_states, handlers = result
-            await self.queue.put((start_states, handlers))
-        await self.queue.put(None)
+def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLHandler],
+             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int) -> dict[str, float]:
 
-    async def start_background(self):
-        """Start the background task that fetches data."""
-        self.task = asyncio.create_task(self._run_async())
-
-    async def get_next_batch(self):
-        """Async method to get a batch (waits if queue is empty)."""
-        return await self.queue.get()
-
-    async def stop(self):
-        """Stop the loader."""
-        self.stop_flag = True
-        # Empty queue to avoid deadlock (because of putting)
-        while not self.queue.empty():
-            await self.queue.get()
-        await self.task
-
-def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLAsyncHandler],
-             device: str, eval_repeats: int, search_time: int, max_retries: int) -> dict[str, float]:
-    bg_eval_loader = BackgroundDataLoader(eval_loader, handler_factory)
-    loop.run_until_complete(bg_eval_loader.start_background())
     similarities = []
     rewards = []
+    handlers = [handler_factory() for _ in range(batch_size)]
+    eval_iter = iter(eval_loader)
     with torch.no_grad():
+        batch = _get_start_states(eval_iter, handlers)
         with tqdm(total=len(eval_loader)) as pbar:
-            for _batch_idx in range(len(eval_loader)):
-                batch = loop.run_until_complete(bg_eval_loader.get_next_batch())
-                eval_states, eval_handlers = batch
-                _state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
-
-                    policy, eval_states, eval_handlers, search_time, device, max_retries=max_retries
-                )
+            while batch is not None:
+                # If the whole batch was invalid, quite unlikely, but possible
+                if not batch:
+                    batch = _get_start_states(eval_iter, handlers)
+                    continue
+                _, start_states = batch
+                try:
+                    _state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
+                        policy, start_states, handlers, search_time, device, max_retries=max_retries
+                    )
+                except BrokenPipeError:
+                    print("Broken pipe error, starting eval all over")
+                    handlers = [handler_factory() for _ in range(batch_size)]
+                    eval_iter = iter(eval_loader)
+                    batch = _get_start_states(eval_iter, handlers)
+                    continue
                 mean_similarity = 0
                 for i in range(len(action_trajectories) // eval_repeats):
                     trajs = action_trajectories[i * eval_repeats:(i + 1) * eval_repeats]
@@ -569,6 +523,7 @@ def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Cal
                 gen_log_rewards_tensor = torch.tensor(gen_log_rewards, device=device)
                 similarities.append(mean_similarity)
                 rewards.append(gen_log_rewards_tensor.exp().mean().item())
+                batch = _get_start_states(eval_iter, handlers)
                 pbar.update(1)
 
     metrics = {
@@ -577,7 +532,6 @@ def evaluate(policy: Policy, loop, eval_loader: DataLoader, handler_factory: Cal
         "validation/nodes_proven": nodes_proven,
         "validation/proof_state_ratio": proof_state_ratio
     }
-    loop.run_until_complete(bg_eval_loader.stop())
     return metrics
 
 def train_gflownet(
@@ -585,7 +539,7 @@ def train_gflownet(
         start_loader: DataLoader,
         precomputed_trajectories: PrecomputedTrajectoryDataset,
         # these are the human-written trajectories
-        handler_factory: Callable[[], LeanREPLAsyncHandler],
+        handler_factory: Callable[[], LeanREPLHandler],
         optimizer: optim.Optimizer,
         z_optimizer: optim.Optimizer,
         gradient_accumulation_steps: int,
@@ -594,6 +548,7 @@ def train_gflownet(
         rounds: int,
         eval_steps: int,
         eval_loader: DataLoader,
+        eval_batch_size: int,
         eval_repeats: int,
         device: str,
         checkpoint_path: Path,
@@ -617,35 +572,35 @@ def train_gflownet(
     tb_loss_acc = back_loss_acc = 0
     metrics_list = []
 
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    bg_loader = BackgroundDataLoader(start_loader, handler_factory)
-    loop.run_until_complete(bg_loader.start_background())
-
     print("Training...")
     training_bar = trange(rounds)
+
+    handlers = [handler_factory() for _ in range(batch_size_replay)]
+
+    data_iter = iter(start_loader)
     for r in training_bar:
 
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
 
-            batch = loop.run_until_complete(bg_loader.get_next_batch())
+            batch = _get_start_states(data_iter, handlers)
             if batch is None:
-                loop.run_until_complete(bg_loader.stop())
-                bg_loader = BackgroundDataLoader(start_loader, handler_factory)
-                loop.run_until_complete(bg_loader.start_background())
-                batch = loop.run_until_complete(bg_loader.get_next_batch())
-            start_states, handlers = batch
-
+                data_iter = iter(start_loader)
+                batch = _get_start_states(data_iter, handlers)
             # If the whole batch was invalid, quite unlikely, but possible
-            if not start_states:
+            if not batch:
                 continue
-
-            state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ration = sample_mcts_trajectories(
-                policy, start_states, handlers, search_time, device, max_retries=max_retries
-            )
+            _, start_states = batch
+            try:
+                state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ration = sample_mcts_trajectories(
+                    policy, start_states, handlers, search_time, device, max_retries=max_retries
+                )
+            except BrokenPipeError:
+                # Reset handlers, try again
+                print("BrokenPipeError, resetting handlers!")
+                handlers = [handler_factory() for _ in range(batch_size_replay)]
+                continue
+            gc.collect()
 
             for t in zip(state_trajectories, action_trajectories, gen_log_rewards):
 
@@ -749,16 +704,13 @@ def train_gflownet(
         wandb.log(training_metrics, step=r)
         
         if r % eval_steps == 0:
-            eval_metrics = evaluate(policy, loop, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries)
+            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size)
             eval_metrics.update(training_metrics)
             metrics_list.append(eval_metrics)
             np.save(metrics_path, np.array(metrics_list, dtype=object), allow_pickle=True)
             policy.save(checkpoint_path)
             wandb.log(eval_metrics, step=r)
             wandb.log_model(checkpoint_path, name=f"model-round-{r}")
-
-    loop.run_until_complete(bg_loader.stop())
-    loop.close()
 
 def collate_skip_none(batch):
     return [i for i in batch if i is not None]
@@ -784,10 +736,12 @@ def main():
     parser.add_argument("--eval-steps", type=int, default=1)
     parser.add_argument("--eval-theorems", type=int, default=20)
     parser.add_argument("--eval-repeats", type=int, default=5)
+    parser.add_argument("--train-on-eval", action="store_true", default=False)
+    parser.add_argument("--batch-size-precomputed", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=1e-4)
     args = parser.parse_args()
 
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
-    async_handler_factory = lambda: LeanREPLAsyncHandler(Path("./leanproject"))
 
     with TemporaryDirectory() as tmp_dir:
         print("Getting data...")
@@ -796,8 +750,9 @@ def main():
         start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
         eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir), repeats=args.eval_repeats, sample_count=args.eval_theorems, filter_lake=False)
-        start_loader = DataLoader(eval_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
-                                  num_workers=args.num_workers, persistent_workers=False)
+        if args.train_on_eval:
+            start_loader = DataLoader(eval_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
+                                     num_workers=args.num_workers, persistent_workers=False)
         eval_loader = DataLoader(eval_states, batch_size=args.eval_batch_size,
                                  collate_fn=collate_skip_none, shuffle=False, num_workers=args.num_workers)
         tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
@@ -846,8 +801,9 @@ def main():
         rounds = args.rounds
         eval_steps = args.eval_steps
         eval_repeats = args.eval_repeats
+        eval_batch_size = args.eval_batch_size
 
-        optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=1e-4)
+        optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=args.lr)
         z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
 
         print("Initializing precomputed trajectories")
@@ -856,10 +812,11 @@ def main():
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
-                  "search_time": args.search_time}
+                  "search_time": args.search_time, "eval_batch_size": eval_batch_size}
         wandb.init(project="proofflow", config=config)
-        train_gflownet(policy, start_loader, precomputed_trajectories, async_handler_factory, optimizer, z_optimizer,
-                       gradient_accumulation_steps, batch_size, batch_size, rounds, eval_steps, eval_loader,
+        train_gflownet(policy, start_loader, precomputed_trajectories, handler_factory, optimizer, z_optimizer,
+                       gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
+                       eval_batch_size,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        max_retries=args.num_tactics, search_time=args.search_time)
 
