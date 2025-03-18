@@ -1,6 +1,6 @@
 import gc
 from dataclasses import dataclass
-from math import exp, log
+from math import exp, log, ceil
 import time
 from typing import Tuple, List, Union, Dict, Any, Iterator, Optional, Callable
 from functools import partial
@@ -803,6 +803,7 @@ def main():
     parser.add_argument("--d-model", type=int, default=960)
     parser.add_argument("--rounds", type=int, default=3_000)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--max-batch-size", type=int, default=32)
     parser.add_argument("--eval-batch-size", type=int, default=32)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--load-checkpoint-path", type=str, default="model.pt")
@@ -828,17 +829,24 @@ def main():
     random.seed(seed)
     np.random.seed(seed)
 
+    if args.batch_size > args.max_batch_size:
+        batch_size = args.max_batch_size
+        gradient_accumulation_steps_mult = ceil(args.batch_size / args.max_batch_size)
+    else:
+        batch_size = args.batch_size
+        gradient_accumulation_steps_mult = 1
+
     handler_factory = lambda: LeanREPLHandler(Path("./leanproject"))
 
     with TemporaryDirectory() as tmp_dir:
         print("Getting data...")
         start_states = ProofStateDataset(LEAN_DOJO_PATH / "train.json", handler_factory, Path("./mathlib4"),
                                          Path(tmp_dir))
-        start_loader = DataLoader(start_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
+        start_loader = DataLoader(start_states, batch_size=batch_size, shuffle=True, collate_fn=collate_skip_none,
                                   num_workers=args.num_workers, persistent_workers=False)
         eval_states = ProofStateDataset(Path("./proof_flow_theorems.json"), handler_factory, Path("./mathlib4"), Path(tmp_dir), repeats=args.eval_repeats, sample_count=args.eval_theorems, filter_lake=False)
         if args.train_on_eval:
-            start_loader = DataLoader(eval_states, batch_size=args.batch_size, shuffle=True, collate_fn=collate_skip_none,
+            start_loader = DataLoader(eval_states, batch_size=batch_size, shuffle=True, collate_fn=collate_skip_none,
                                      num_workers=args.num_workers, persistent_workers=False)
         eval_loader = DataLoader(eval_states, batch_size=args.eval_batch_size,
                                  collate_fn=collate_skip_none, shuffle=False, num_workers=args.num_workers)
@@ -883,8 +891,7 @@ def main():
         # policy = Policy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id, proofstate_sep_id,
         #                 successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
 
-        gradient_accumulation_steps = args.gradient_accumulation_steps
-        batch_size = args.batch_size
+        gradient_accumulation_steps = args.gradient_accumulation_steps * gradient_accumulation_steps_mult
         rounds = args.rounds * args.gradient_accumulation_steps
         eval_steps = args.eval_steps
         eval_repeats = args.eval_repeats
