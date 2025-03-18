@@ -816,6 +816,7 @@ def main():
     parser.add_argument("--eval-steps", type=int, default=100)
     parser.add_argument("--eval-theorems", type=int, default=20)
     parser.add_argument("--eval-repeats", type=int, default=1)
+    parser.add_argument("--train-repeats", type=int, default=127)
     parser.add_argument("--train-on-eval", action="store_true", default=True)
     parser.add_argument("--batch-size-precomputed", type=int, default=2)
     parser.add_argument("--lr", type=float, default=5e-5)
@@ -888,6 +889,7 @@ def main():
         eval_steps = args.eval_steps
         eval_repeats = args.eval_repeats
         eval_batch_size = args.eval_batch_size
+        train_repeats = args.train_repeats
 
         optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=args.lr)
         z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
@@ -901,14 +903,14 @@ def main():
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
-                  "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed}
+                  "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed, "train_repeats": train_repeats}
         wandb.init(project="proofflow", config=config, entity="scalogi")
         train_gflownet(policy, start_loader, precomputed_trajectories, handler_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
                        eval_batch_size,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        partial(linear_schedule_length, initial_length=1, every_steps=100),
-                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=127, temperature=args.temperature)
+                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=train_repeats, temperature=args.temperature)
 
         wandb.finish(exit_code=0)
 
