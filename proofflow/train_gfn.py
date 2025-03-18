@@ -605,11 +605,11 @@ def train_gflownet(
     print("Training...")
     training_bar = trange(rounds)
 
-    handlers = [handler_factory() for _ in range(batch_size_replay)]
+    #handlers = [handler_factory() for _ in range(batch_size_replay)]
 
     data_iter = iter(start_loader)
     for r in training_bar:
-
+        handlers = [handler_factory() for _ in range(batch_size_replay)]
         with torch.no_grad():
             # 0. add new trajectories to the replay buffer
 
@@ -628,7 +628,6 @@ def train_gflownet(
             except BrokenPipeError:
                 # Reset handlers, try again
                 print("BrokenPipeError, resetting handlers!")
-                handlers = [handler_factory() for _ in range(batch_size_replay)]
                 continue
             gc.collect()
 
