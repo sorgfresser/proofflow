@@ -20,12 +20,11 @@ from math import sqrt
 from mamba_ssm.models.config_mamba import MambaConfig
 from tqdm import trange, tqdm
 from argparse import ArgumentParser
-import asyncio
 import wandb
 import numpy as np
 import random
 from transformers import AutoModel, AutoTokenizer
-
+import re
 
 
 class ModelBlock(nn.Module):
@@ -270,6 +269,17 @@ def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler], n
              zip(proof_states, thms)]
     return proof_states, [MCTS(node) for node in nodes]
 
+
+period_regex = re.compile(r"(\w+)(\s)\.(\s)(\w+)")
+
+def postprocess_tactic(tactic: str):
+    original = tactic
+    tactic = re.sub(period_regex, r"\g<1>.\g<4>", original)
+    while original != tactic:
+        tactic = re.sub(period_regex, r"\g<1>.\g<4>", original)
+    return tactic
+
+
 def _envs_expand(
         handlers: list[LeanREPLHandler],
         tactics: list[list[str]],
@@ -294,6 +304,17 @@ def _envs_expand(
                 msg.severity == "error" for msg in response["messages"])
             has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(
                 msg.severity == "error" for msg in response.messages))
+            # Try again with the postprocessed version
+            if has_error:
+                start_time = time.perf_counter()
+                handler.send_tactic(postprocess_tactic(tactic), proof_state_idx)
+                response, _ = handler.receive_json()
+                times[i][-1] = time.perf_counter() - start_time
+                has_error = "message" in response and response["message"].startswith("Lean error")
+                has_error = has_error or "messages" in response and any(
+                    msg.severity == "error" for msg in response["messages"])
+                has_error = has_error or (isinstance(response, LeanREPLNextProofState) and any(
+                    msg.severity == "error" for msg in response.messages))
             if has_error:
                 invalid[i].append(True)
                 proven[i].append(False)
