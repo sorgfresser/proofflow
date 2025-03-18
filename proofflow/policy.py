@@ -221,7 +221,7 @@ class Policy:
         return [self.tokenizer.batch_decode(result) for result in result_ids], result_ids, prompts
 
     def _build_prompt(self, proof_state: str, tactics_so_far: Optional[List[str]] = None,
-                      proof_states_so_far: Optional[List[str]] = None, state_skip: int = 2) -> List[int]:
+                      proof_states_so_far: Optional[List[str]] = None, state_skip: int = 10) -> List[int]:
         state_ids: List[int] = self.tokenizer.encode(proof_state)
         to_append = []
         if tactics_so_far is not None:

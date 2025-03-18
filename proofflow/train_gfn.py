@@ -508,6 +508,7 @@ def sample_mcts_trajectories(
 
 # TODO: use levenshtein distance
 def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
+    return 0  # TODO: fix list not hashable
     # here we compute the mean number of length N subsequences in pairs of trajectories
     result = 0
 
@@ -516,7 +517,7 @@ def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
         traj_dict = {}
         for sub_idx in range(len(action_traj)-N+1):
             sub_seq = action_traj[sub_idx:sub_idx+N]
-            traj_dict[sub_seq] = traj_dict.get(sub_seq, 0) + 1  # TODO: fix list not hashable
+            traj_dict[sub_seq] = traj_dict.get(sub_seq, 0) + 1
         traj_dicts.append(traj_dict)
 
     for a_0 in traj_dicts:
@@ -556,7 +557,7 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
 
 
 def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLHandler],
-             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int) -> dict[str, float]:
+             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int, name: str) -> dict[str, float]:
 
     similarities = []
     rewards = []
@@ -593,10 +594,10 @@ def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[
                 pbar.update(1)
 
     metrics = {
-        "validation/mean_reward": sum(rewards) / len(rewards),
-        "validation/similarity": float(sum(similarities)) / len(similarities),
-        "validation/nodes_proven": nodes_proven,
-        "validation/proof_state_ratio": proof_state_ratio
+        f"validation/mean_reward_{name}": sum(rewards) / len(rewards),
+        f"validation/similarity_{name}": float(sum(similarities)) / len(similarities),
+        f"validation/nodes_proven_{name}": nodes_proven,
+        f"validation/proof_state_ratio_{name}": proof_state_ratio
     }
     return metrics
 
@@ -643,7 +644,7 @@ def train_gflownet(
     replay_buffer = [None] * replay_buffer_len
     replay_end, replay_saturated = 0, False
 
-    tb_loss_acc = back_loss_acc = 0
+    tb_loss_acc = back_loss_acc = reward_acc = 0
     metrics_list = []
 
     print("Training...")
@@ -751,12 +752,17 @@ def train_gflownet(
 
             training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
             training_bar.refresh()
+
+        unique_trajs = len(set([tuple([tuple(action) for action in actions]) for __, actions, __ in trajs]))
         scaler.scale(loss).backward()
+        reward_acc += sampled_mean_reward / gradient_accumulation_steps
         training_metrics = {"train/tb_loss": tb_loss.item(), "train/back_loss": back_loss.item(),
                             "train/sampled_mean_reward": sampled_mean_reward,
                             "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
-                            "train.mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
-                            "train/action_lengths": action_lengths, "train/mcts_max_length": current_length}
+                            "train/mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
+                            "train/action_lengths": action_lengths, "train/mcts_max_length": current_length, 
+                            "train/nodes_proven": nodes_proven, "train/proof_state_ration": proof_state_ration,
+                            "train/unique": unique_trajs/len(trajs)}
         wandb.log(training_metrics, step=r)
 
         if (r + 1) % gradient_accumulation_steps == 0:
@@ -770,13 +776,15 @@ def train_gflownet(
             z_optimizer.zero_grad()
 
             training_metrics.update({"train/accumulated_tb_loss": tb_loss_acc,
-                                     "train/accumulated_back_loss": back_loss_acc})
-            tb_loss_acc = back_loss_acc = 0
+                                     "train/accumulated_back_loss": back_loss_acc,
+                                     "train/reward_acc": reward_acc})
+            tb_loss_acc = back_loss_acc = reward_acc = 0
 
         wandb.log(training_metrics, step=r)
-        
+
         if r % eval_steps == 0:
-            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size)
+            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "a")
+            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "b")
             eval_metrics.update(training_metrics)
             metrics_list.append(eval_metrics)
             np.save(metrics_path, np.array(metrics_list, dtype=object), allow_pickle=True)
@@ -793,24 +801,24 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--n-layers", type=int, default=30)
     parser.add_argument("--d-model", type=int, default=960)
-    parser.add_argument("--rounds", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--eval-batch-size", type=int, default=2)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument("--rounds", type=int, default=1_000)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--eval-batch-size", type=int, default=4)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--load-checkpoint-path", type=str, default="model.pt")
     parser.add_argument("--save-checkpoint-path", type=str, default="checkpoint.pt")
     parser.add_argument("--save-metrics-path", type=str, default="metrics.npy")
     parser.add_argument("--reload-checkpoint", action="store_true", default=True)
     parser.add_argument("--num-tactics", type=int, default=10,
                         help="Number of tactics to sample from the policy per state")
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--search-time", type=int, default=100, help="Number of MCTS nodes to explore before selecting a tactic")
-    parser.add_argument("--eval-steps", type=int, default=1)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--search-time", type=int, default=3, help="Number of MCTS nodes to explore before selecting a tactic")
+    parser.add_argument("--eval-steps", type=int, default=100)
     parser.add_argument("--eval-theorems", type=int, default=20)
-    parser.add_argument("--eval-repeats", type=int, default=5)
-    parser.add_argument("--train-on-eval", action="store_true", default=False)
+    parser.add_argument("--eval-repeats", type=int, default=1)
+    parser.add_argument("--train-on-eval", action="store_true", default=True)
     parser.add_argument("--batch-size-precomputed", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=0.7)
     args = parser.parse_args()
@@ -894,12 +902,12 @@ def main():
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
                   "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed}
-        wandb.init(project="proofflow", config=config)
+        wandb.init(project="proofflow", config=config, entity="scalogi")
         train_gflownet(policy, start_loader, precomputed_trajectories, handler_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
                        eval_batch_size,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
-                       partial(linear_schedule_length, initial_length=1, every_steps=10),
+                       partial(linear_schedule_length, initial_length=1, every_steps=100),
                        max_retries=args.num_tactics, search_time=args.search_time, train_repeats=5, temperature=args.temperature)
 
         wandb.finish(exit_code=0)
