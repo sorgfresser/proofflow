@@ -477,7 +477,7 @@ def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
         traj_dict = {}
         for sub_idx in range(len(action_traj)-N+1):
             sub_seq = action_traj[sub_idx:sub_idx+N]
-            traj_dict[sub_seq] = traj_dict.get(sub_seq, 0) + 1
+            traj_dict[sub_seq] = traj_dict.get(sub_seq, 0) + 1  # TODO: fix list not hashable
         traj_dicts.append(traj_dict)
 
     for a_0 in traj_dicts:
@@ -656,6 +656,9 @@ def train_gflownet(
                     replay_saturated = True
                     replay_end = 0
 
+            sampled_mean_reward = sum(map(exp, gen_log_rewards)) / len(gen_log_rewards)
+            action_lengths = sum(map(len, action_trajectories)) / len(action_trajectories)
+
             # 1. randomly sample from the replay buffer and from human trajectories
             end_idx = replay_buffer_len if replay_saturated else replay_end
             idxs_replay = torch.randint(0, end_idx, (batch_size_replay,))
@@ -721,10 +724,9 @@ def train_gflownet(
 
             training_bar.set_description_str(f"tb_loss: {tb_loss:2.2f}, back_loss: {back_loss:2.2f}")
             training_bar.refresh()
-        action_lengths = sum(map(len, actions), 0) / len(actions)
         scaler.scale(loss).backward()
         training_metrics = {"train/tb_loss": tb_loss.item(), "train/back_loss": back_loss.item(),
-                            "train/sampled_mean_reward": log_rewards_tensor.exp().mean().item(),
+                            "train/sampled_mean_reward": sampled_mean_reward,
                             "train/mean_action_p_f": log_p_f.mean().item(), "train/mean_action_p_b": log_p_b.mean().item(),
                             "train.mean_log_z": log_z.mean().item(), "train/std_log_z": log_z.std().item(),
                             "train/action_lengths": action_lengths}
@@ -767,7 +769,7 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--n-layers", type=int, default=30)
     parser.add_argument("--d-model", type=int, default=960)
-    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--eval-batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
