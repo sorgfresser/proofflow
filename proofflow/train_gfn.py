@@ -271,13 +271,16 @@ def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler], n
 
 
 period_regex = re.compile(r"(\w+)(\s)\.(\s)(\w+)")
+subscript_regex = re.compile(r"(\w+)(\s)([₀₁₂₃₄₅₆₇₈₉])")
 
 def postprocess_tactic(tactic: str):
     original = tactic
     tactic = re.sub(period_regex, r"\g<1>.\g<4>", original)
+    tactic = re.sub(subscript_regex, r"\g<1>\g<3>", tactic)
     while original != tactic:
         original = tactic
         tactic = re.sub(period_regex, r"\g<1>.\g<4>", original)
+        tactic = re.sub(subscript_regex, r"\g<1>\g<3>", tactic)
     return tactic
 
 
@@ -381,7 +384,8 @@ def sample_mcts_trajectories(
         search_time: int,
         device: str,
         max_len: int = 10,
-        max_retries: int = 5
+        max_retries: int = 5,
+        temperature: float = 0.7
 ) -> Tuple[List[List[List[int]]], List[List[List[int]]], list[float], int, float]:
     action_trajectories = [[] for __ in start_states]  # list of actions for each proof
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
@@ -416,7 +420,7 @@ def sample_mcts_trajectories(
                 histories = [current.previous_states for current in currents]
 
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    tactic_strings = policy.next_tactics(end_states, max_retries, None, histories, temperature=1)
+                    tactic_strings = policy.next_tactics(end_states, max_retries, None, histories, temperature=temperature)
 
                 current_handlers = [handlers[node_idx] for node_idx in range(len(start_states)) if not start_states[node_idx].done]
                 proven, invalid, indices, goals, times_current = _envs_expand(current_handlers, tactic_strings,
@@ -624,7 +628,8 @@ def train_gflownet(
         replay_buffer_len: int = 1_000,
         max_retries: int = 5,
         search_time: int = 100,
-        train_repeats: int = 1
+        train_repeats: int = 1,
+        temperature: float = 0.7
 ):
 
     policy.model.train()
@@ -660,7 +665,7 @@ def train_gflownet(
             _, start_states = batch
             try:
                 state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ration = sample_mcts_trajectories(
-                    policy, start_states, handlers, search_time, device, max_retries=max_retries, max_len=current_length
+                    policy, start_states, handlers, search_time, device, max_retries=max_retries, max_len=current_length, temperature=temperature
                 )
             except BrokenPipeError:
                 # Reset handlers, try again
@@ -807,6 +812,7 @@ def main():
     parser.add_argument("--batch-size-precomputed", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--temperature", type=float, default=0.7)
     args = parser.parse_args()
     seed = args.seed
     torch.manual_seed(seed)
@@ -894,7 +900,7 @@ def main():
                        eval_batch_size,
                        eval_repeats, device, Path(args.save_checkpoint_path), Path(args.save_metrics_path),
                        partial(linear_schedule_length, initial_length=1, every_steps=10),
-                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=3)
+                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=5, temperature=args.temperature)
 
         wandb.finish(exit_code=0)
 
