@@ -463,14 +463,14 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            log_rewards[i] = _compute_log_internlm([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1, [node.root.proof_state])[0]
             if node.done:
                 end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
                 state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
                 done[i] = True
 
         idx += 1
-
+    for i, node in enumerate(start_states):
+        log_rewards[i] = _compute_log_internlm([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1, [node.root.proof_state])[0]
     for i, t in enumerate(state_trajectories):
         if not start_states[i].done:
             t.append(t[-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
