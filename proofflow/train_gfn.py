@@ -801,7 +801,7 @@ def main():
     parser = ArgumentParser()
     parser.add_argument("--n-layers", type=int, default=30)
     parser.add_argument("--d-model", type=int, default=960)
-    parser.add_argument("--rounds", type=int, default=3_000)
+    parser.add_argument("--rounds", type=int, default=2_000)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--max-batch-size", type=int, default=32)
     parser.add_argument("--eval-batch-size", type=int, default=32)
@@ -810,7 +810,7 @@ def main():
     parser.add_argument("--save-checkpoint-path", type=str, default="checkpoint.pt")
     parser.add_argument("--save-metrics-path", type=str, default="metrics.npy")
     parser.add_argument("--reload-checkpoint", action="store_true", default=True)
-    parser.add_argument("--num-tactics", type=int, default=100,
+    parser.add_argument("--num-tactics", type=int, default=25,
                         help="Number of tactics to sample from the policy per state")
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--search-time", type=int, default=5, help="Number of MCTS nodes to explore before selecting a tactic")
@@ -919,7 +919,7 @@ def main():
         train_gflownet(policy, start_loader, precomputed_trajectories, handler_factory, optimizer, z_optimizer,
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
                        eval_batch_size, eval_repeats, device, save_checkpoint_path, save_metrics_path,
-                       partial(linear_schedule_length, initial_length=1, every_steps=100),
+                       partial(linear_schedule_length, initial_length=1, every_steps=100*gradient_accumulation_steps),
                        max_retries=args.num_tactics, search_time=args.search_time, train_repeats=train_repeats, temperature=args.temperature)
 
         wandb.finish(exit_code=0)
