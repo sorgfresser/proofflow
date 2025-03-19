@@ -396,6 +396,7 @@ def sample_mcts_trajectories(
     nodes_proven = 0
     expanded_node_count = 0
     valid_child_count = 0
+    search_time = min(search_time, max_len)
     while not all(node.done for node in start_states) and idx < max_len:
 
         try:

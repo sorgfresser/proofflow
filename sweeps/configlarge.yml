@@ -6,8 +6,12 @@ metric:
   name: validation/mean_reward_a
 parameters:
   batch-size:
-    values: [1, 4]
+    values: [5]
   train-repeats:
-    values: [1, 5]
+    values: [5]
+  num-tactics:
+    value: 50
+  temperature:
+    value: 0.8
   load-checkpoint-path:
-    value: smallmodel.pt
+    value: bigmodel.pt
