@@ -812,7 +812,7 @@ def main():
     parser.add_argument("--reload-checkpoint", action="store_true", default=True)
     parser.add_argument("--num-tactics", type=int, default=100,
                         help="Number of tactics to sample from the policy per state")
-    parser.add_argument("--num-workers", type=int, default=32)
+    parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--search-time", type=int, default=5, help="Number of MCTS nodes to explore before selecting a tactic")
     parser.add_argument("--eval-steps", type=int, default=50)
     parser.add_argument("--eval-theorems", type=int, default=20)
