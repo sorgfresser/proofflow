@@ -483,12 +483,12 @@ def sample_mcts_trajectories(
             print(f"Current proof: {current_proof}")
             raise e
 
+        # Fill trajectories with the latest move, update rewards
+        prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) if not node.proven() else [] for node in start_states]
+
         # Actual MCTS move after trying a few nodes
         for node in start_states:
             node.move()
-        # Fill trajectories with the latest move, update rewards
-        prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) for node in
-                    start_states]
 
         for i, node in enumerate(start_states):
             if done[i]: continue
@@ -507,7 +507,7 @@ def sample_mcts_trajectories(
     for i, node in enumerate(start_states):
         log_rewards[i] = _compute_log_internlm([node.proven()], [node.invalid()], [node.time], node.step_count + 1, [node.root.proof_state])[0]
     for i, t in enumerate(state_trajectories):
-        if not start_states[i].done:
+        if not start_states[i].proven() and not start_states[i].invalid():
             t.append(t[-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
     assert all(len(state) == len(action) + 1 for state, action in zip(state_trajectories, action_trajectories, strict=True))
 
