@@ -527,8 +527,8 @@ def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
 
 
 class PrecomputedTrajectoryDataset(TheoremDataset):
-    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy, create_lookup: bool = False):
-        super().__init__(data_path)
+    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy, create_lookup: bool = False, filter_lake: bool = True):
+        super().__init__(data_path, filter_lake=filter_lake)
         self.tokenizer = tokenizer
         self.policy = policy
         self._lookup = None
@@ -905,7 +905,7 @@ def main():
 
         print("Initializing precomputed trajectories")
         if args.train_on_eval:
-            precomputed_trajectories = PrecomputedTrajectoryDataset(Path("./proof_flow_theorems.json"), tokenizer, policy, create_lookup=True)
+            precomputed_trajectories = PrecomputedTrajectoryDataset(Path("./proof_flow_theorems.json"), tokenizer, policy, create_lookup=True, filter_lake=False)
         else:
             precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy, create_lookup=True)
 

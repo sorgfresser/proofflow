@@ -1,0 +1,13 @@
+program: proofflow/train_gfn.py
+name: sweeprl
+method: grid
+metric:
+  goal: maximize
+  name: validation/mean_reward_a
+parameters:
+  batch-size:
+    values: [1, 4, 64]
+  train-repeats:
+    values: [1, 5, 127]
+  load-checkpoint-path:
+    value: smallmodel.pt
