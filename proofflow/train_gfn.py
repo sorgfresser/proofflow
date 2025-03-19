@@ -899,6 +899,7 @@ def main():
         eval_repeats = args.eval_repeats
         eval_batch_size = args.eval_batch_size
         train_repeats = args.train_repeats
+        temperature = args.temperature
 
         optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=args.lr)
         z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
@@ -912,7 +913,8 @@ def main():
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
-                  "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed, "train_repeats": train_repeats}
+                  "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed, "train_repeats": train_repeats,
+                  "temperature": temperature}
         wandb.init(project="proofflow", config=config, entity="scalogi")
         save_checkpoint_path = Path(args.save_checkpoint_path + "_" + str(batch_size) + "_" + str(train_repeats))
         save_metrics_path = Path(args.save_metrics_path + "_" + str(batch_size) + "_" + str(train_repeats))
@@ -920,7 +922,7 @@ def main():
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
                        eval_batch_size, eval_repeats, device, save_checkpoint_path, save_metrics_path,
                        partial(linear_schedule_length, initial_length=1, every_steps=100*gradient_accumulation_steps),
-                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=train_repeats, temperature=args.temperature)
+                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=train_repeats, temperature=temperature)
 
         wandb.finish(exit_code=0)
 
