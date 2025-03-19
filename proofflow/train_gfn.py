@@ -784,7 +784,7 @@ def train_gflownet(
 
         if r % eval_steps == 0:
             eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "a")
-            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "b")
+            eval_metrics.update(evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "b"))
             eval_metrics.update(training_metrics)
             metrics_list.append(eval_metrics)
             np.save(metrics_path, np.array(metrics_list, dtype=object), allow_pickle=True)
