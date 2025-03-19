@@ -1,6 +1,6 @@
 import gc
 from dataclasses import dataclass
-from math import exp, log, ceil
+from math import exp, log, ceil, floor
 import time
 from typing import Tuple, List, Union, Dict, Any, Iterator, Optional, Callable
 from functools import partial
@@ -829,9 +829,11 @@ def main():
     random.seed(seed)
     np.random.seed(seed)
 
-    if args.batch_size > args.max_batch_size:
-        batch_size = args.max_batch_size
-        gradient_accumulation_steps_mult = ceil(args.batch_size / args.max_batch_size)
+    product = args.batch_size * (args.train_repeats + 1)
+    if product > args.max_batch_size:
+        batch_size = floor(args.max_batch_size / (args.train_repeats + 1))
+        assert batch_size > 0
+        gradient_accumulation_steps_mult = ceil(args.batch_size / batch_size)
     else:
         batch_size = args.batch_size
         gradient_accumulation_steps_mult = 1
