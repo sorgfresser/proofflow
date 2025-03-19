@@ -8,7 +8,7 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.11"
 lean-repl-py = "^0.1.10"
-torch = "^2.6.0"
+torch = "^2.5.1"
 transformers = "^4.49.0"
 wandb = "^0.19.8"
 torch-scatter = "^2.1.2"
