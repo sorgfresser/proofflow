@@ -112,7 +112,7 @@ def get_start_theorems(path):
 
 @dataclass
 class Node:
-    proof_state: str
+    proof_state: Optional[str]
     parent: Union["Node", None] = None
     parent_tactic: str = ""
     children_for_tactics: Dict[str, "Node"] = None
@@ -157,6 +157,9 @@ class Node:
         if not self.children_for_tactics:
             self.backup_branch_done()
             return
+        for tac in self.children_for_tactics:
+            if self.children_for_tactics[tac].proof_state is None:
+                self.children_for_tactics[tac].backup_branch_done()
         self.backup()
 
     def backup_branch_done(self):
@@ -220,10 +223,9 @@ class MCTS:
         self.step_count = 0
         self.done = False
         self.last_tactic = ""
-        self.solved = False
 
     def move(self):
-        if self.done:
+        if not self.root.children_for_tactics:
             return
         best_tactic = self.root.best_action()
         self.proof += best_tactic + "\n"
@@ -243,6 +245,14 @@ class MCTS:
         if node.branch_is_done:
             self.done = True
         return node
+
+    def proven(self) -> bool:
+        return self.root.proof_state is None
+
+    def invalid(self) -> bool:
+        if not self.root.has_been_expanded:
+            return False
+        return not self.root.children_for_tactics and not self.proven()
 
 
 def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler], num_repeats: int = 1) -> \
@@ -396,8 +406,8 @@ def sample_mcts_trajectories(
     nodes_proven = 0
     expanded_node_count = 0
     valid_child_count = 0
-    search_time = min(search_time, max_len)
-    while not all(node.done for node in start_states) and idx < max_len:
+
+    while not all(node.proven() or node.invalid() for node in start_states) and idx < max_len:
 
         try:
 
@@ -429,13 +439,12 @@ def sample_mcts_trajectories(
                 current_idx = 0
 
                 for i, node in enumerate(start_states):
-
                     if node.done:
                         continue
 
                     rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
-                    # Only passes on valid tactics to expand, we might want to change this
 
+                    # Only expand valid tactics
                     tactics = [t for t, p in zip(tactic_strings[current_idx], invalid[current_idx], strict=True) if not p]
                     goals_node = [g for g, p in zip(goals[current_idx], invalid[current_idx], strict=True) if not p]
                     times_current_node = [t for t, p in zip(times_current[current_idx], invalid[current_idx], strict=True) if not p]
@@ -445,16 +454,13 @@ def sample_mcts_trajectories(
                     if tactics:
                         valid_child_count += 1
                     currents[current_idx].expand(tactics, goals_node, times_current_node, rewards, indices_node)
-                    if any(proven[current_idx]):
+                    # Select one of the valid tactics
+                    if node.root.branch_is_done:
                         node.done = True
-                        node.solved = True
-                        node.last_tactic = tactic_strings[current_idx][proven[current_idx].index(True)]
-                        nodes_proven += 1
-                    # Edge case, if we only have invalid tactics, there is no way to continue
-                    elif node.root.branch_is_done:
-                        node.done = True
-                        node.solved = False
-                        node.last_tactic = tactic_strings[current_idx][0] # all of them are unproven, just take 0
+                        if not node.root.children_for_tactics:
+                            assert currents[current_idx] == node.root
+                            node.last_tactic = tactic_strings[current_idx][0]
+
                     current_idx += 1
         except BrokenPipeError as e:
             raise e
@@ -490,14 +496,16 @@ def sample_mcts_trajectories(
             # Observation: we do not update last tactic in case of an invalid MCTS, so this will simply repeat the tactic before the invalid proof state
             action_trajectories[i].append(
                 policy.tokenizer.encode(node.last_tactic) + [policy.tokenizer.eos_token_id])
-            if node.done:
-                end_token = policy.successful_proof_token if node.solved else policy.invalid_proof_token
+            if node.proven() or node.invalid():
+                if node.proven():
+                    nodes_proven += 1
+                end_token = policy.successful_proof_token if node.proven() else policy.invalid_proof_token
                 state_trajectories[i].append(prompts[i][:-1] + [policy.proofstate_sep_id, end_token, policy.proof_step_id])
                 done[i] = True
 
         idx += 1
     for i, node in enumerate(start_states):
-        log_rewards[i] = _compute_log_internlm([node.solved], [not node.solved and node.done], [node.time], node.step_count + 1, [node.root.proof_state])[0]
+        log_rewards[i] = _compute_log_internlm([node.proven()], [node.invalid()], [node.time], node.step_count + 1, [node.root.proof_state])[0]
     for i, t in enumerate(state_trajectories):
         if not start_states[i].done:
             t.append(t[-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])

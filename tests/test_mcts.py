@@ -1,4 +1,4 @@
-from proofflow.train_gfn import MCTS, Node, train_gflownet
+from proofflow.train_gfn import MCTS, Node, train_gflownet, sample_mcts_trajectories, _compute_log_internlm
 from lean_repl_py import LeanREPLHandler, LeanREPLProofState, LeanREPLNextProofState
 from pathlib import Path
 import torch
@@ -64,6 +64,8 @@ class MockPolicy:
         self.tokenizer = MockTokenizer()
         self.successful_proof_token = 1
         self.invalid_proof_token = 2
+        self.proofstate_sep_id = 3
+        self.proof_step_id = 4
 
     def next_tactics_int(self, *args, **kwargs):
         if self.tactic_idx < len(self.tactics):
@@ -72,6 +74,9 @@ class MockPolicy:
             return tactic, None, None
         else:
             return [], None, None
+
+    def next_tactics(self, *args, **kwargs):
+        return self.next_tactics_int(*args, **kwargs)[0]
 
     def _build_prompt(self, *args, **kwargs):
         return list(range(1, 10))
@@ -154,3 +159,68 @@ theorem blockDiagonal'_apply (M : ∀ i, Matrix (m' i) (n' i) α) (ik jk) :
                          [['simp', 'simp', 'simp', 'simp', 'simp']]])
     train_gflownet(policy, [], [1], handler_factory, Path("./mathlib4"), MockOptimizer(), MockOptimizer(), 5, 1, 0, 30,
                    "cpu")
+
+
+def test_mcts_simple_monkeypatch_failure(monkeypatch, handler, monkeypatch_torch):
+    handler.send_command("""theorem pandq (p q : Prop) (a : p) (b : q) : p ∧ q := by sorry""")
+    response, env = handler.receive_json()
+    proof_state = response["sorries"][0]
+    assert isinstance(proof_state, LeanREPLProofState)
+    root = Node(proof_state.goal, proof_state_idx=proof_state.proof_state)
+    mcts = MCTS(root)
+    monkeypatch.setattr("proofflow.train_gfn._get_start_states", lambda *args, **kwargs: ([proof_state], [mcts]))
+
+    policy = MockPolicy([[["exact a", "exact b", "constructor", "linarith", "apply And.intro"]],
+                          [["exact a", "constructor", "exact b", "something1", "something2"]],
+                          [["exact c", "exact d", "exact m", "exact n", "something3"]],
+                          [["exact c", "exact d", "exact m", "exact n", "something3"]]])
+    states, actions, rewards, nodes_proven, valid_ratio = sample_mcts_trajectories(policy, [mcts], [handler], 50, "cuda", 10, 5, 0.7)
+    assert states == [[[1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 3, 2, 4]]]
+    assert actions == [[[1, 2, 3, 4, 5, 6, 7, 8, 9, 0], [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]]]
+    assert pytest.approx(rewards[0], abs=1e-7) == _compute_log_internlm([False], [True], [None], 3, [None])[0]
+    assert nodes_proven == 0
+    assert valid_ratio == 0.5
+
+def test_mcts_simple_monkeypatch_working(monkeypatch, handler, monkeypatch_torch):
+    handler.send_command("""theorem pandq (p q : Prop) (a : p) (b : q) : p ∧ q := by sorry""")
+    response, env = handler.receive_json()
+    proof_state = response["sorries"][0]
+    assert isinstance(proof_state, LeanREPLProofState)
+    root = Node(proof_state.goal, proof_state_idx=proof_state.proof_state)
+    mcts = MCTS(root)
+    monkeypatch.setattr("proofflow.train_gfn._get_start_states", lambda *args, **kwargs: ([proof_state], [mcts]))
+
+    policy = MockPolicy([[["exact a", "exact b", "constructor", "linarith", "apply And.intro"]],
+                          [["exact a", "constructor", "exact b", "something1", "something2"]],
+                          [["exact c", "exact d", "exact m", "exact n", "something3"]],
+                          [["exact b", "exact d", "exact m", "exact n", "somethming3"]]])
+    states, actions, rewards, nodes_proven, valid_ratio = sample_mcts_trajectories(policy, [mcts], [handler], 50, "cuda", 10, 5, 0.7)
+    assert states == [[[1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9],[1, 2, 3, 4, 5, 6, 7, 8, 3, 1, 4]]]
+    assert actions == [[[1, 2, 3, 4, 5, 6, 7, 8, 9, 0], [1, 2, 3, 4, 5, 6, 7, 8, 9, 0], [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]]]
+    assert pytest.approx(rewards[0], abs=1e-3) == pytest.approx(_compute_log_internlm([True], [None], [None], 4, [None])[0], abs=1e-3)
+    assert nodes_proven == 1
+    assert valid_ratio == 0.75
+
+
+def test_mcts_simple_monkeypatch_working_advanced(monkeypatch, handler, monkeypatch_torch):
+    handler.send_command("""theorem pandq (p q : Prop) (a : p) (b : q) : p ∧ q := by sorry""")
+    response, env = handler.receive_json()
+    proof_state = response["sorries"][0]
+    assert isinstance(proof_state, LeanREPLProofState)
+    root = Node(proof_state.goal, proof_state_idx=proof_state.proof_state)
+    mcts = MCTS(root)
+    monkeypatch.setattr("proofflow.train_gfn._get_start_states", lambda *args, **kwargs: ([proof_state], [mcts]))
+
+    policy = MockPolicy([[["exact a", "exact b", "constructor", "linarith", "apply And.intro"]],
+                          [["exact a", "constructor", "exact b", "something1", "something2"]],
+                          [["exact c", "exact d", "exact m", "exact n", "something3"]],
+                          [["exact b", "apply And.left", "exact m", "exact n", "somethming3"]],
+                          [["exact b", "constructor", "exact m", "exact n", "something3"]],
+                          [["exact g", "exact b", "exact m", "exact n", "somethming3"]],
+                          [["exact g", "simpa", "exact m", "exact n", "somethming3"]]])
+    states, actions, rewards, nodes_proven, valid_ratio =  sample_mcts_trajectories(policy, [mcts], [handler], 50, "cuda", 10, 5, 0.7)
+    assert states == [[[1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9],[1, 2, 3, 4, 5, 6, 7, 8, 3, 1, 4]]]
+    assert actions == [[[1, 2, 3, 4, 5, 6, 7, 8, 9, 0], [1, 2, 3, 4, 5, 6, 7, 8, 9, 0], [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]]]
+    assert pytest.approx(rewards[0], abs=1e-3) == pytest.approx(_compute_log_internlm([True], [None], [None], 4, [None])[0], abs=1e-3)
+    assert nodes_proven == 1
+    assert pytest.approx(valid_ratio, abs=1e-4) == 0.85714
