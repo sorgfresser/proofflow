@@ -198,7 +198,7 @@ def main():
     train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data,
                Path(args.checkpoint_path), eval_batch_size=eval_batch_size, epochs=epochs,
                loss_on_prompt=args.loss_on_prompt, tactics_so_far=args.tactics_so_far, states_so_far=args.states_so_far,
-               half_precision=args.half_precision)
+               half_precision=args.half_precision, early_stopping=early_stopping)
     wandb.finish(exit_code=0)
 
 
