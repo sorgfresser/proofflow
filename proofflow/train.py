@@ -170,6 +170,7 @@ def main():
                         help="Use half precision for training")
     parser.add_argument("--early-stopping", action="store_true", default=False,
                         help="Use early stopping on the validation accuracy")
+    parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()
 
     train_data = TrainSampleDataset(LEAN_DOJO_PATH / "train.json")
@@ -209,11 +210,12 @@ def main():
     epochs = args.epochs
     eval_batch_size = args.eval_batch_size
     early_stopping = args.early_stopping
+    lr = args.lr
     early_stopper = EarlyStopper(patience=3, min_delta=0.01, enabled=early_stopping)
-    optimizer = optim.AdamW(model.parameters())
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
     config = {"gradient_accumulation_steps": gradient_accumulation_steps, "batch_size": batch_size, "epochs": epochs,
               "eval_steps": eval_steps, "n_layers": n_layers, "d_model": d_model, "eval_batch_size": eval_batch_size,
-              "loss_on_prompt": args.loss_on_prompt, "tactics_so_far": args.tactics_so_far,
+              "loss_on_prompt": args.loss_on_prompt, "tactics_so_far": args.tactics_so_far, "lr": lr,
               "states_so_far": args.states_so_far, "half_precision": args.half_precision, "early_stopping": early_stopping}
     wandb.init(project="proofflow", config=config)
     train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data,
