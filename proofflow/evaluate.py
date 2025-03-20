@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--reprover", action="store_true", default=False, help="Use ReProver instead of Mamba.")
     parser.add_argument("--best-first", action="store_true", default=False, help="Use ReProver perplexity as reward instead of critic model.")
+    parser.add_argument("--special-reward", action="store_true", default=False)
     args = parser.parse_args()
     checkpoint_path = Path(args.checkpoint_path)
     json_path = Path(args.json_path)
@@ -34,11 +35,12 @@ def main():
     num_workers = args.num_workers
     reprover = args.reprover
     best_first = args.best_first
+    special_reward = args.special_reward
 
     assert checkpoint_path.exists() and json_path.exists()
     config = {"num_workers": num_workers, "batch_size": batch_size, "num_tactics": num_tactics,
               "search_time": search_time, "checkpoint_path": checkpoint_path, "json_path": json_path,
-              "reprover": reprover, "best_first": best_first}
+              "reprover": reprover, "best_first": best_first, "special_reward": special_reward}
     wandb.init(project="proofflow", config=config)
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
@@ -57,7 +59,7 @@ def main():
                             num_workers=num_workers)
         torch.backends.cudnn.benchmark = True
 
-        results = evaluate(policy, loader, handler_fac, device, 1, search_time, num_tactics, batch_size, "", reprover_policy=reprover_policy)
+        results = evaluate(policy, loader, handler_fac, device, 1, search_time, num_tactics, batch_size, "", reprover_policy=reprover_policy, special_reward=special_reward)
         print("Evaluation results", results)
         wandb.log(results)
     wandb.finish(exit_code=0)

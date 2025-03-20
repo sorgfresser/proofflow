@@ -124,6 +124,7 @@ class Node:
     previous_states: List[str] = None
     proof_state_idx: int = -1
     metadata: Dict[str, Any] = None
+    parent_tactics: List[str] = None
 
     def __post_init__(self):
         self.children_for_tactics = {} if self.children_for_tactics is None else self.children_for_tactics
@@ -132,6 +133,7 @@ class Node:
         self.times = {} if self.times is None else self.times
         self.previous_states = [] if self.previous_states is None else self.previous_states
         self.metadata = {} if self.metadata is None else self.metadata
+        self.parent_tactics = [] if self.parent_tactics is None else self.parent_tactics
 
     def expand(self, tactics: List[str], proof_states: List[str], times: List[float], values: List[float],
                indices: List[int]):
@@ -150,7 +152,7 @@ class Node:
                     continue
                 self.children_for_tactics[tactic] = Node(proof_states[idx], parent=self, parent_tactic=tactic,
                                                          previous_states=self.previous_states + [self.proof_state],
-                                                         proof_state_idx=indices[idx], metadata=self.metadata)
+                                                         proof_state_idx=indices[idx], metadata=self.metadata, parent_tactics=self.parent_tactics + [tactic])
                 self.times[tactic] = times[idx]
                 self.total_action_values[tactic] = values[idx]
                 self.visit_counts[tactic] = 1
@@ -399,10 +401,10 @@ def _compute_log_reprover(reprover_policy: ReProverPolicy, proven: List[bool], i
         else:  # ongoing = small reward
             # rewards.append(0.1 + 0.25*exp(-t))  # compute time does not work with precomputed proofs
             score1 = - reprover_policy.logprobs(proof_states, tactics)
-            # We keep score in [1, 100] such that the final reward is in [0.08, 8] to still be larger than 0.01
-            score1 = max(score1, 1)
-            score1 = min(score1, 100)
-            rewards.append(log(8 / score1) + log(1 - exp(-length / 5)))
+            # We keep score in [10, 1000] such that the final reward is in [0.08, 8] to still be larger than 0.01
+            score1 = max(score1, 10)
+            score1 = min(score1, 1000)
+            rewards.append(log(80 / score1) + log(1 - exp(-length / 5)))
     return rewards
 
 
@@ -418,6 +420,7 @@ def sample_mcts_trajectories(
         temperature: float = 0.7,
         state_skip: int = 1,
         reprover_policy: Optional[ReProverPolicy] = None,
+        special_reward_for_mcts: bool = False
 ) -> Tuple[List[List[List[int]]], List[List[List[int]]], list[float], int, float]:
     action_trajectories = [[] for __ in start_states]  # list of actions for each proof
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
@@ -463,9 +466,13 @@ def sample_mcts_trajectories(
                 for i, node in enumerate(start_states):
                     if node.done:
                         continue
-
-                    rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
-
+                    if not special_reward_for_mcts:
+                        rewards = _compute_log_rewards(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1)
+                    else:
+                        if reprover_policy:
+                            rewards = _compute_log_reprover(reprover_policy, proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1, [currents[current_idx].previous_states + [currents[current_idx].proof_state] for _ in proven[current_idx]], [currents[current_idx].parent_tactics + [tactic] for tactic in tactic_strings[current_idx]])
+                        else:
+                            rewards = _compute_log_internlm(proven[current_idx], invalid[current_idx], times_current[current_idx], len(currents[current_idx].previous_states) + 1, [currents[current_idx].previous_states for _ in proven[current_idx]])
                     # Only expand valid tactics
                     tactics = [t for t, p in zip(tactic_strings[current_idx], invalid[current_idx], strict=True) if not p]
                     goals_node = [g for g, p in zip(goals[current_idx], invalid[current_idx], strict=True) if not p]
@@ -592,7 +599,7 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
 
 
 def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLHandler],
-             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int, name: str, state_skip: int = 1,reprover_policy: Optional[ReProverPolicy] = None) -> dict[str, float]:
+             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int, name: str, state_skip: int = 1,reprover_policy: Optional[ReProverPolicy] = None, special_reward: bool = False) -> dict[str, float]:
 
     similarities = []
     rewards = []
@@ -609,7 +616,7 @@ def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[
                 _, start_states = batch
                 try:
                     _state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
-                        policy, start_states, handlers, search_time, device, max_retries=max_retries, state_skip=state_skip, reprover_policy=reprover_policy
+                        policy, start_states, handlers, search_time, device, max_retries=max_retries, state_skip=state_skip, reprover_policy=reprover_policy, special_reward_for_mcts=special_reward
                     )
                 except BrokenPipeError:
                     print("Broken pipe error, starting eval all over")
