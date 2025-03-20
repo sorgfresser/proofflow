@@ -211,7 +211,7 @@ def main():
     eval_batch_size = args.eval_batch_size
     early_stopping = args.early_stopping
     lr = args.lr
-    early_stopper = EarlyStopper(patience=3, min_delta=0.01, enabled=early_stopping)
+    early_stopper = EarlyStopper(patience=2, min_delta=0.02, enabled=early_stopping)
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     config = {"gradient_accumulation_steps": gradient_accumulation_steps, "batch_size": batch_size, "epochs": epochs,
               "eval_steps": eval_steps, "n_layers": n_layers, "d_model": d_model, "eval_batch_size": eval_batch_size,
