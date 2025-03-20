@@ -80,15 +80,19 @@ def evaluate(policy: Policy, data: TrainSampleDataset, eval_batch_size: int = 64
 def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimizer, gradient_accumulation_steps: int,
                batch_size: int, eval_steps: int, valid_data: TrainSampleDataset, checkpoint_path: Path,
                eval_batch_size: int = 4, epochs: int = 3, loss_on_prompt: bool = False, tactics_so_far: bool = False,
-               states_so_far: bool = False, half_precision: bool = False):
+               states_so_far: bool = False, half_precision: bool = False, early_stopping: bool = False):
     data_loader = DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=collate_train_samples)
     policy.model.train()
     scaler = torch.amp.GradScaler(enabled=half_precision, device=policy.device)
     optimizer.zero_grad()
     current_step = 0
+    current_acc = 0
+    stopped = False
     print(f"Saving model to {checkpoint_path}")
     policy.save(checkpoint_path)
     for epoch in range(epochs):
+        if stopped:
+            break
         for batch in tqdm(data_loader):
             with torch.amp.autocast(dtype=torch.bfloat16, enabled=half_precision, device_type=policy.device):
                 loss = policy.train_batch(batch, loss_on_prompt, tactics_so_far,
@@ -106,13 +110,19 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                 metrics = {f"validation/{key}": value for key, value in metrics.items()}
                 wandb.log(metrics, step=current_step)
                 print(metrics)
+                if current_acc > metrics["validation/accuracy"] and early_stopping:
+                    print("Old accuracy was larger, early stopping...")
+                    stopped = True
+                    break
+                current_acc = metrics["validation/accuracy"]
                 print(f"Saving model to {checkpoint_path}")
                 policy.save(checkpoint_path)
             current_step += 1
-        print(f"Epoch {epoch} done")
-        print(f"Saving model to {checkpoint_path}")
-        policy.save(checkpoint_path)
-        wandb.log_model(checkpoint_path, name=f"model-epoch-{epoch}")
+        if not stopped:
+            print(f"Epoch {epoch} done")
+            print(f"Saving model to {checkpoint_path}")
+            policy.save(checkpoint_path)
+            wandb.log_model(checkpoint_path, name=f"model-epoch-{epoch}")
     print("Training done")
     metrics = evaluate(policy, valid_data, eval_batch_size)
     metrics = {f"validation/{key}": value for key, value in metrics.items()}
@@ -138,12 +148,12 @@ def main():
                         help="Use the states so far as model input")
     parser.add_argument("--half-precision", action="store_true", default=False,
                         help="Use half precision for training")
+    parser.add_argument("--early-stopping", action="store_true", default=False,
+                        help="Use early stopping on the validation accuracy")
     args = parser.parse_args()
 
     train_data = TrainSampleDataset(LEAN_DOJO_PATH / "train.json")
     valid_data = TrainSampleDataset(LEAN_DOJO_PATH / "val.json")
-    eval_data = TheoremDataset(LEAN_DOJO_PATH / "val.json")
-    test_data = TheoremDataset(LEAN_DOJO_PATH / "test.json")
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
 
@@ -178,11 +188,12 @@ def main():
     eval_steps = args.eval_steps
     epochs = args.epochs
     eval_batch_size = args.eval_batch_size
+    early_stopping = args.early_stopping
     optimizer = optim.AdamW(model.parameters())
     config = {"gradient_accumulation_steps": gradient_accumulation_steps, "batch_size": batch_size, "epochs": epochs,
               "eval_steps": eval_steps, "n_layers": n_layers, "d_model": d_model, "eval_batch_size": eval_batch_size,
               "loss_on_prompt": args.loss_on_prompt, "tactics_so_far": args.tactics_so_far,
-              "states_so_far": args.states_so_far, "half_precision": args.half_precision}
+              "states_so_far": args.states_so_far, "half_precision": args.half_precision, "early_stopping": early_stopping}
     wandb.init(project="proofflow", config=config)
     train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data,
                Path(args.checkpoint_path), eval_batch_size=eval_batch_size, epochs=epochs,
