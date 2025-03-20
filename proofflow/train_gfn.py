@@ -395,7 +395,8 @@ def sample_mcts_trajectories(
         device: str,
         max_len: int = 10,
         max_retries: int = 5,
-        temperature: float = 0.7
+        temperature: float = 0.7,
+        state_skip: int = 1
 ) -> Tuple[List[List[List[int]]], List[List[List[int]]], list[float], int, float]:
     action_trajectories = [[] for __ in start_states]  # list of actions for each proof
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
@@ -431,7 +432,7 @@ def sample_mcts_trajectories(
                 histories = [current.previous_states for current in currents]
 
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    tactic_strings = policy.next_tactics(end_states, max_retries, None, histories, temperature=temperature)
+                    tactic_strings = policy.next_tactics(end_states, max_retries, None, histories, temperature=temperature, state_skip=state_skip)
 
                 current_handlers = [handlers[node_idx] for node_idx in range(len(start_states)) if not start_states[node_idx].done]
                 proven, invalid, indices, goals, times_current = _envs_expand(current_handlers, tactic_strings,
@@ -566,7 +567,7 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
 
 
 def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLHandler],
-             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int, name: str) -> dict[str, float]:
+             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int, name: str, state_skip: int = 1) -> dict[str, float]:
 
     similarities = []
     rewards = []
@@ -583,7 +584,7 @@ def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[
                 _, start_states = batch
                 try:
                     _state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
-                        policy, start_states, handlers, search_time, device, max_retries=max_retries
+                        policy, start_states, handlers, search_time, device, max_retries=max_retries, state_skip=state_skip
                     )
                 except BrokenPipeError:
                     print("Broken pipe error, starting eval all over")
@@ -639,7 +640,8 @@ def train_gflownet(
         max_retries: int = 5,
         search_time: int = 100,
         train_repeats: int = 1,
-        temperature: float = 0.7
+        temperature: float = 0.7,
+        state_skip: int = 1
 ):
 
     policy.model.train()
@@ -675,7 +677,8 @@ def train_gflownet(
             _, start_states = batch
             try:
                 state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ration = sample_mcts_trajectories(
-                    policy, start_states, handlers, search_time, device, max_retries=max_retries, max_len=current_length, temperature=temperature
+                    policy, start_states, handlers, search_time, device, max_retries=max_retries, max_len=current_length,
+                    temperature=temperature, state_skip=state_skip
                 )
             except BrokenPipeError:
                 # Reset handlers, try again
@@ -792,8 +795,8 @@ def train_gflownet(
         wandb.log(training_metrics, step=r)
 
         if r % eval_steps == 0:
-            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "a")
-            eval_metrics.update(evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "b"))
+            eval_metrics = evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "a", state_skip=state_skip)
+            eval_metrics.update(evaluate(policy, eval_loader, handler_factory, device, eval_repeats, search_time, max_retries, eval_batch_size, "b", state_skip=state_skip))
             eval_metrics.update(training_metrics)
             metrics_list.append(eval_metrics)
             np.save(metrics_path, np.array(metrics_list, dtype=object), allow_pickle=True)
@@ -829,6 +832,7 @@ def main():
     parser.add_argument("--train-repeats", type=int, default=5)
     parser.add_argument("--train-on-eval", action="store_true", default=True)
     parser.add_argument("--batch-size-precomputed", type=int, default=2)
+    parser.add_argument("--state-skip", type=int, default=10)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=1)
@@ -931,7 +935,8 @@ def main():
                        gradient_accumulation_steps, batch_size, args.batch_size_precomputed, rounds, eval_steps, eval_loader,
                        eval_batch_size, eval_repeats, device, save_checkpoint_path, save_metrics_path,
                        partial(linear_schedule_length, initial_length=1, every_steps=100*gradient_accumulation_steps),
-                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=train_repeats, temperature=temperature)
+                       max_retries=args.num_tactics, search_time=args.search_time, train_repeats=train_repeats, temperature=temperature,
+                       state_skip=args.state_skip)
 
         wandb.finish(exit_code=0)
 

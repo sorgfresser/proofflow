@@ -88,7 +88,7 @@ class Policy:
     def next_tactic(self, proof_states: Union[List[str], str],
                     tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                     previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
-                    temperature: float = 0.0, max_new_tokens: int = 20) -> Union[List[str], str]:
+                    temperature: float = 0.0, max_new_tokens: int = 20, state_skip: int = 1) -> Union[List[str], str]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
         This is a wrapper around next_tactic_int, which also returns tokenization and prompts to avoid
         recomputing these when training the GFlowNet.
@@ -100,12 +100,12 @@ class Policy:
         :param max_new_tokens: The maximum number of new tokens to generate for the tactics
         :return: The subsequent tactics
         """
-        return self.next_tactic_int(proof_states, tactics_so_far, previous_proof_states, temperature, max_new_tokens)[0]
+        return self.next_tactic_int(proof_states, tactics_so_far, previous_proof_states, temperature, max_new_tokens, state_skip=state_skip)[0]
 
     def next_tactic_int(self, proof_states: Union[List[str], str],
                         tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                         previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
-                        temperature: float = 0.0, max_new_tokens: int = 20) -> \
+                        temperature: float = 0.0, max_new_tokens: int = 20, state_skip: int = 1) -> \
                             Tuple[Union[List[str], str], Union[List[List[int]], List[int]], Union[List[List[int]], List[int]]]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
         Additionally, return the tokenization and prompts generated.
@@ -118,7 +118,7 @@ class Policy:
         :return: The subsequent tactics, the tokenization of the tactics, the generated prompts
         """
         tactics, tactic_ids, prompts = self.next_tactics_int(proof_states, 1, tactics_so_far, previous_proof_states, temperature,
-                                             max_new_tokens)
+                                             max_new_tokens, state_skip=state_skip)
         assert len(tactics) == len(tactic_ids)
         if len(tactics) == 1:
             return tactics[0], tactic_ids[0], prompts
@@ -127,7 +127,7 @@ class Policy:
     def next_tactics(self, proof_states: Union[List[str], str], k: int,
                      tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                      previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
-                     temperature: float = 0.0, max_new_tokens: int = 20) -> Union[List[List[str]], List[str]]:
+                     temperature: float = 0.0, max_new_tokens: int = 20, state_skip: int = 1) -> Union[List[List[str]], List[str]]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
         This is a wrapper around next_tactics_int, which also returns tokenization and prompts to avoid
         recomputing these when training the GFlowNet.
@@ -140,12 +140,12 @@ class Policy:
         :param max_new_tokens: The maximum number of new tokens to generate for the tactics
         :return: The subsequent tactics
         """
-        return self.next_tactics_int(proof_states, k, tactics_so_far, previous_proof_states, temperature, max_new_tokens)[0]
+        return self.next_tactics_int(proof_states, k, tactics_so_far, previous_proof_states, temperature, max_new_tokens, state_skip=state_skip)[0]
 
     def next_tactics_int(self, proof_states: Union[List[str], str], k: int,
                      tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
                      previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
-                     temperature: float = 0.0, max_new_tokens: int = 20) -> \
+                     temperature: float = 0.0, max_new_tokens: int = 20, state_skip: int = 1) -> \
                             Tuple[Union[List[List[str]], List[str]], Union[List[List[List[int]]], List[List[int]]], Union[List[List[int]], List[int]]]:
         """Predict the subsequent tactics for the given proof states (which might have multiple goals)
         Additionally, return the tokenization and prompts generated.
@@ -174,7 +174,7 @@ class Policy:
 
         assert len(proof_states) == len(tactics_so_far) == len(previous_proof_states)
 
-        prompts = [self._build_prompt(proof_state, preceding_tactics, preceding_states)
+        prompts = [self._build_prompt(proof_state, preceding_tactics, preceding_states, state_skip=state_skip)
                     for proof_state, preceding_tactics, preceding_states in
                     zip(proof_states, tactics_so_far, previous_proof_states)]
         prompt_results = self.tokenizer.pad({"input_ids": prompts}, padding_side="right", return_tensors="pt")
@@ -250,7 +250,7 @@ class Policy:
         return logits, labels
 
     def train_batch(self, batch: list[TrainingSample], loss_on_prompt: bool = False, tactics_so_far: bool = False,
-                    proof_states_so_far: bool = False) -> torch.Tensor:
+                    proof_states_so_far: bool = False, state_skip: int = 1) -> torch.Tensor:
         """Train on one single batch of training samples.
 
         :param batch: The batch to train on
@@ -260,15 +260,15 @@ class Policy:
         :return:
         """
         if tactics_so_far and proof_states_so_far:
-            prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far, sample.proof_states_so_far) for
+            prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far, sample.proof_states_so_far, state_skip=state_skip) for
                        sample in batch]
         elif tactics_so_far:
-            prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far) for sample in batch]
+            prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far, state_skip=state_skip) for sample in batch]
         elif proof_states_so_far:
-            prompts = [self._build_prompt(sample.proof_state, proof_states_so_far=sample.proof_states_so_far) for sample
+            prompts = [self._build_prompt(sample.proof_state, proof_states_so_far=sample.proof_states_so_far, state_skip=state_skip) for sample
                        in batch]
         else:
-            prompts = [self._build_prompt(sample.proof_state) for sample in batch]
+            prompts = [self._build_prompt(sample.proof_state, state_skip=state_skip) for sample in batch]
         tactics = [self.tokenizer.encode(sample.tactic) for sample in batch]
 
         full = {
@@ -282,13 +282,13 @@ class Policy:
                 labels[i, :len(prompts[i]) - 1] = -100
         return self.loss_fn(logits.transpose(2, 1), labels)
 
-    def evaluate_batch(self, batch: list[TrainingSample]) -> dict[str, float]:
+    def evaluate_batch(self, batch: list[TrainingSample], state_skip : int = 1) -> dict[str, float]:
         """Evaluate on one single batch of training samples.
 
         :param batch: The batch to evaluate on
         :return: The metrics
         """
-        prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far) for sample in batch]
+        prompts = [self._build_prompt(sample.proof_state, sample.tactics_so_far, state_skip=state_skip) for sample in batch]
         tactics = [self.tokenizer.encode(sample.tactic) for sample in batch]
 
         full = {
