@@ -23,7 +23,8 @@ def main():
     parser.add_argument("--num-tactics", type=int, default=32)
     parser.add_argument("--search-time", type=int, default=10)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--reprover", action="store_true", default=False)
+    parser.add_argument("--reprover", action="store_true", default=False, help="Use ReProver instead of Mamba.")
+    parser.add_argument("--best-first", action="store_true", default=False, help="Use ReProver perplexity as reward instead of critic model.")
     args = parser.parse_args()
     checkpoint_path = Path(args.checkpoint_path)
     json_path = Path(args.json_path)
@@ -32,11 +33,12 @@ def main():
     num_tactics = args.num_tactics
     num_workers = args.num_workers
     reprover = args.reprover
+    best_first = args.best_first
 
     assert checkpoint_path.exists() and json_path.exists()
     config = {"num_workers": num_workers, "batch_size": batch_size, "num_tactics": num_tactics,
               "search_time": search_time, "checkpoint_path": checkpoint_path, "json_path": json_path,
-              "reprover": reprover}
+              "reprover": reprover, "best_first": best_first}
     wandb.init(project="proofflow", config=config)
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained("./lean_tokenizer")
@@ -49,12 +51,13 @@ def main():
             policy = ReProverPolicy.from_pretrained("cuda", False)
         else:
             policy = MambaPolicy.from_file(checkpoint_path, True, tokenizer, device)
+        reprover_policy = ReProverPolicy.from_pretrained("cuda", False) if best_first else None
         policy.model.eval()
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_skip_none,
                             num_workers=num_workers)
         torch.backends.cudnn.benchmark = True
 
-        results = evaluate(policy, loader, handler_fac, device, 1, search_time, num_tactics, batch_size, "")
+        results = evaluate(policy, loader, handler_fac, device, 1, search_time, num_tactics, batch_size, "", reprover_policy=reprover_policy)
         print("Evaluation results", results)
         wandb.log(results)
     wandb.finish(exit_code=0)

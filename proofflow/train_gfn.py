@@ -13,7 +13,7 @@ from proofflow.data import parse_json, LEAN_DOJO_PATH, Theorem, ProofStateDatase
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from torch.utils.data import DataLoader
-from proofflow.policy import Policy, MambaLMHeadModelWrapper, MambaPolicy
+from proofflow.policy import Policy, MambaLMHeadModelWrapper, MambaPolicy, ReProverPolicy
 from transformers import PreTrainedTokenizerFast, PreTrainedTokenizer
 import torch.optim as optim
 from math import sqrt
@@ -23,7 +23,7 @@ from argparse import ArgumentParser
 import wandb
 import numpy as np
 import random
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, AutoModelForSeq2SeqLM
 import re
 
 
@@ -219,6 +219,7 @@ class MCTS:
         self.root = root
         self.metadata = root.metadata
         self.proof = ""
+        self.tactics = []
         self.time = 0.0
         self.step_count = 0
         self.done = False
@@ -229,6 +230,7 @@ class MCTS:
             return
         best_tactic = self.root.best_action()
         self.proof += best_tactic + "\n"
+        self.tactics.append(best_tactic)
         self.time += self.root.times[best_tactic]
         self.root = self.root.children_for_tactics[best_tactic]
         self.root.parent = None  # speedup memory release
@@ -386,6 +388,24 @@ def _compute_log_internlm(proven: List[bool], invalid: List[bool], times: List[f
             rewards.append(log(score1 + 4) + log(1 - exp(-length / 5)))
     return rewards
 
+def _compute_log_reprover(reprover_policy: ReProverPolicy, proven: List[bool], invalid: List[bool], times: List[float], length: int, proof_states_list: List[List[str]], tactics_list: List[List[str]]) -> List[float]:
+    rewards = []
+    for p, i, _t, proof_states, tactics in zip(proven, invalid, times, proof_states_list, tactics_list):
+        if i:
+            rewards.append(log(0.01))
+        elif p:  # proof complete
+            # rewards.append(1 + 15*exp(-t))  # compute time does not work with precomputed proofs
+            rewards.append(log(10) + log(1 - exp(-length / 5)))
+        else:  # ongoing = small reward
+            # rewards.append(0.1 + 0.25*exp(-t))  # compute time does not work with precomputed proofs
+            score1 = - reprover_policy.logprobs(proof_states, tactics)
+            # We keep score in [1, 100] such that the final reward is in [0.08, 8] to still be larger than 0.01
+            score1 = max(score1, 1)
+            score1 = min(score1, 100)
+            rewards.append(log(8 / score1) + log(1 - exp(-length / 5)))
+    return rewards
+
+
 
 def sample_mcts_trajectories(
         policy: Policy,
@@ -396,7 +416,8 @@ def sample_mcts_trajectories(
         max_len: int = 10,
         max_retries: int = 5,
         temperature: float = 0.7,
-        state_skip: int = 1
+        state_skip: int = 1,
+        reprover_policy: Optional[ReProverPolicy] = None,
 ) -> Tuple[List[List[List[int]]], List[List[List[int]]], list[float], int, float]:
     action_trajectories = [[] for __ in start_states]  # list of actions for each proof
     state_trajectories = [[] for __ in start_states]  # list of GFlowNet states for each proof
@@ -506,7 +527,10 @@ def sample_mcts_trajectories(
 
         idx += 1
     for i, node in enumerate(start_states):
-        log_rewards[i] = _compute_log_internlm([node.proven()], [node.invalid()], [node.time], node.step_count + 1, [node.root.proof_state])[0]
+        if reprover_policy:
+            log_rewards[i] = _compute_log_reprover(reprover_policy, [node.proven()], [node.invalid()], [node.time], node.step_count + 1, [node.root.previous_states], [node.tactics])[0]
+        else:
+            log_rewards[i] = _compute_log_internlm([node.proven()], [node.invalid()], [node.time], node.step_count + 1, [node.root.proof_state])[0]
     for i, t in enumerate(state_trajectories):
         if not start_states[i].proven() and not start_states[i].invalid():
             t.append(t[-1][:-1] + [policy.proofstate_sep_id, policy.incomplete_proof_token, policy.proof_step_id])
@@ -568,7 +592,7 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
 
 
 def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[[], LeanREPLHandler],
-             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int, name: str, state_skip: int = 1) -> dict[str, float]:
+             device: str, eval_repeats: int, search_time: int, max_retries: int, batch_size: int, name: str, state_skip: int = 1,reprover_policy: Optional[ReProverPolicy] = None) -> dict[str, float]:
 
     similarities = []
     rewards = []
@@ -585,7 +609,7 @@ def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[
                 _, start_states = batch
                 try:
                     _state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
-                        policy, start_states, handlers, search_time, device, max_retries=max_retries, state_skip=state_skip
+                        policy, start_states, handlers, search_time, device, max_retries=max_retries, state_skip=state_skip, reprover_policy=reprover_policy
                     )
                 except BrokenPipeError:
                     print("Broken pipe error, starting eval all over")
@@ -837,6 +861,7 @@ def main():
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=1)
+    parser.add_argument("--reprover", action="store_true", default=False)
     args = parser.parse_args()
     seed = args.seed
     torch.manual_seed(seed)
@@ -890,16 +915,19 @@ def main():
 
         checkpoint_path = Path(args.load_checkpoint_path)
         print("Initializing model")
-        if args.reload_checkpoint:
-            policy = MambaPolicy.from_file(checkpoint_path, True, tokenizer, device)
-            d_model = policy.config.d_model
-            n_layers = policy.config.n_layer
+        if args.reprover:
+            policy = ReProverPolicy.from_pretrained(device, is_gflownet=True)
         else:
-            config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
-            model = MambaLMHeadModelWrapper(config, device=device, is_gflownet=True)
-            policy = MambaPolicy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
-                                 proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token,
-                                 tokenizer, device, mamba_config=config)
+            if args.reload_checkpoint:
+                policy = MambaPolicy.from_file(checkpoint_path, True, tokenizer, device)
+                d_model = policy.config.d_model
+                n_layers = policy.config.n_layer
+            else:
+                config = MambaConfig(vocab_size=tokenizer.vocab_size, n_layer=n_layers, d_model=d_model)
+                model = MambaLMHeadModelWrapper(config, device=device, is_gflownet=True)
+                policy = MambaPolicy(model, eos_id, proofstep_id, proofstate_id, tactics_id, tactics_sep_id,
+                                     proofstate_sep_id, successful_proof_token, incomplete_proof_token, invalid_proof_token,
+                                     tokenizer, device, mamba_config=config)
         policy.model.train()
         # policy.model = torch.compile(policy.model)
         torch.backends.cudnn.benchmark = True
@@ -914,6 +942,7 @@ def main():
         eval_batch_size = args.eval_batch_size
         train_repeats = args.train_repeats
         temperature = args.temperature
+        state_skip = args.state_skip
 
         optimizer = optim.AdamW(policy.model.get_non_z_params(), lr=args.lr)
         z_optimizer = optim.AdamW(policy.model.get_z_params(), lr=1e-3)
@@ -928,7 +957,7 @@ def main():
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
                   "eval_repeats": eval_repeats, "eval_theorems": args.eval_theorems, "num_tactics": args.num_tactics,
                   "search_time": args.search_time, "eval_batch_size": eval_batch_size, "seed": seed, "train_repeats": train_repeats,
-                  "temperature": temperature}
+                  "temperature": temperature, "state_skip": state_skip, "reprover": args.reprover}
         wandb.init(project="proofflow", config=config, entity="scalogi")
         save_checkpoint_path = Path(args.save_checkpoint_path + "_" + str(batch_size) + "_" + str(train_repeats))
         save_metrics_path = Path(args.save_metrics_path + "_" + str(batch_size) + "_" + str(train_repeats))
@@ -937,7 +966,7 @@ def main():
                        eval_batch_size, eval_repeats, device, save_checkpoint_path, save_metrics_path,
                        partial(linear_schedule_length, initial_length=1, every_steps=100*gradient_accumulation_steps),
                        max_retries=args.num_tactics, search_time=args.search_time, train_repeats=train_repeats, temperature=temperature,
-                       state_skip=args.state_skip)
+                       state_skip=state_skip)
 
         wandb.finish(exit_code=0)
 

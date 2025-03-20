@@ -1,6 +1,7 @@
 from torch import nn
 from typing import Optional, List, Union, Tuple
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, BatchEncoding
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, BatchEncoding, AutoTokenizer, AutoModel, T5Model, \
+    AutoModelForSeq2SeqLM
 import torch
 from proofflow.data import TrainingSample
 from pathlib import Path
@@ -30,6 +31,48 @@ class MambaLMHeadModelWrapper(MambaLMHeadModel):
 
     def log_z(self, input_ids, attention_mask):
         hidden_states = self.backbone(input_ids)
+        # Get the last one that has attention one
+        last_indices = attention_mask.sum(1) - 1
+        hidden_states = hidden_states[torch.arange(hidden_states.shape[0]), last_indices]
+        lm_logits = self.z_head(hidden_states)
+        return lm_logits
+
+    def get_non_z_params(self):
+        return [i for i in self.parameters() if all(id(i) != id(j) for j in self.get_z_params())]
+
+    def get_z_params(self):
+        return self.z_head.parameters()
+
+
+class ReProver(nn.Module):
+    def __init__(self, model: T5Model, *args, device=None, dtype=None, is_gflownet: bool = False, **kwargs):
+        super().__init__()
+        self.backbone = model
+        if is_gflownet:
+            self.back_head = nn.Linear(model.decoder.config.d_model, model.config.vocab_size, bias=False, device=device,
+                                       dtype=dtype)
+            self.z_head = nn.Linear(model.decoder.config.d_model, 1, bias=True, device=device, dtype=dtype)
+        else:
+            self.back_head, self.z_head = None, None
+
+    def generate(self, *args, **kwargs):
+        return self.backbone.generate(*args, **kwargs)
+
+    def forward(self, input_ids, attention_mask, decoder_input_ids = None, decoder_attention_mask = None):
+        if decoder_input_ids is None:
+            decoder_input_ids = self.backbone._shift_right(input_ids)
+        return self.backbone(input_ids, attention_mask=attention_mask, decoder_attention_mask=decoder_attention_mask,
+                             decoder_input_ids=decoder_input_ids).logits
+
+    def p_b(self, input_ids):
+        decoder_input_ids = self.backbone._shift_right(input_ids)
+        hidden_states = self.backbone(input_ids, decoder_input_ids=decoder_input_ids, output_hidden_states=True)
+        back_logits = self.back_head(hidden_states)
+        return back_logits
+
+    def log_z(self, input_ids, attention_mask):
+        decoder_input_ids = self.backbone._shift_right(input_ids)
+        hidden_states = self.backbone(input_ids, decoder_input_ids=decoder_input_ids, output_hidden_states=True)
         # Get the last one that has attention one
         last_indices = attention_mask.sum(1) - 1
         hidden_states = hidden_states[torch.arange(hidden_states.shape[0]), last_indices]
@@ -380,3 +423,100 @@ class MambaPolicy(Policy):
         result = super().from_file(path, model, tokenizer, device, strict=not is_gflownet)
         result.config = mamba_config
         return result
+
+
+class ReProverPolicy(Policy):
+    def __init__(self, model: nn.Module, eos_id: int, proof_step_id: int, proof_state_id: int,
+                 tactics_id: int, tactics_sep_id: int, proofstate_sep_id: int,
+                 successful_proof_token: int, incomplete_proof_token: int, invalid_proof_token: int,
+                 tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+                 device: str = "cpu"):
+        super().__init__(model, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, proofstate_sep_id,
+                         successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
+
+    def _build_prompt(self, proof_state: str, tactics_so_far: Optional[List[str]] = None,
+                      proof_states_so_far: Optional[List[str]] = None, state_skip: int = 10) -> List[int]:
+        proof_states_so_far = proof_states_so_far[len(proof_states_so_far) % state_skip:: state_skip]
+        full = proof_states_so_far + [proof_state]
+        return self.tokenizer.encode("\n".join(full))
+
+    @classmethod
+    def from_pretrained(cls, device: str, is_gflownet: bool) -> "ReProverPolicy":
+        url = "kaiyuy/leandojo-lean4-tacgen-byt5-small"
+        tokenizer = AutoTokenizer.from_pretrained(url)
+        eos_id = 1
+        proof_step_id = 259
+        proof_state_id = 260
+        tactics_id = 261
+        tactics_sep_id = 262
+        proofstate_sep_id = 263
+        successful_proof_token = 264
+        incomplete_proof_token = 265
+        invalid_proof_token = 266
+        model = AutoModelForSeq2SeqLM.from_pretrained(url)
+        model.to(device)
+        reprover = ReProver(model, device=device, is_gflownet=is_gflownet)
+        return cls(reprover, eos_id, proof_step_id, proof_state_id, tactics_id, tactics_sep_id, proofstate_sep_id,
+                   successful_proof_token, incomplete_proof_token, invalid_proof_token, tokenizer, device)
+
+    def next_tactics_int(self, proof_states: Union[List[str], str], k: int,
+                         tactics_so_far: Optional[Union[List[List[str]], List[str]]] = None,
+                         previous_proof_states: Optional[Union[List[List[str]], List[str]]] = None,
+                         temperature: float = 0.0, max_new_tokens: int = 20,  state_skip: int = 1) -> \
+            Tuple[Union[List[List[str]], List[str]], Union[List[List[List[int]]], List[List[int]]], Union[
+                List[List[int]], List[int]]]:
+        output_single = False
+        if isinstance(proof_states, str):
+            output_single = True
+            proof_states = [proof_states]
+            assert not tactics_so_far or isinstance(tactics_so_far[0], str)
+            tactics_so_far = [tactics_so_far] if tactics_so_far is not None else None
+            assert not previous_proof_states or isinstance(previous_proof_states[0], str)
+            previous_proof_states = [previous_proof_states] if previous_proof_states is not None else None
+
+        if not tactics_so_far:
+            tactics_so_far = [None] * len(proof_states)
+        if not previous_proof_states:
+            previous_proof_states = [None] * len(proof_states)
+
+        assert len(proof_states) == len(tactics_so_far) == len(previous_proof_states)
+        previous_proof_states = previous_proof_states[len(previous_proof_states) % state_skip:: state_skip]
+        result_ids = []
+        for proof_state, previous_states in zip(proof_states, previous_proof_states):
+            prompt = "\n".join(proof_state)
+            prompt_tokens = self.tokenizer(prompt, return_tensors="pt")
+            input_ids = prompt_tokens["input_ids"].to(self.device)
+            attention_mask = prompt_tokens["attention_mask"].to(self.device)
+            tactic_ids = self.model.generate(input_ids=input_ids, attention_mask=attention_mask, num_return_sequences=k, do_sample=True,
+                                             temperature=temperature)
+            result_ids.append(tactic_ids)
+
+        prompts = [self._build_prompt(proof_state, preceding_tactics, preceding_states)
+                   for proof_state, preceding_tactics, preceding_states in
+                   zip(proof_states, tactics_so_far, previous_proof_states)]
+        if output_single:
+            return self.tokenizer.batch_decode(result_ids[0], skip_special_tokens=True), result_ids[0], prompts[0]
+        return [self.tokenizer.batch_decode(result, skip_special_tokens=True) for result in result_ids], result_ids, prompts
+
+
+    def logprobs(self, proof_states: Union[List[str], str], tactics: Union[List[str], str]) -> float:
+        if isinstance(proof_states, str):
+            proof_states = [proof_states]
+            tactics = [tactics]
+        assert len(proof_states) == len(tactics)
+        full = [proof_state + "\n" + tactic for proof_state, tactic in zip(proof_states, tactics)]
+        tokenized = self.tokenizer(full, return_tensors="pt")
+        input_ids = tokenized["input_ids"].to(self.device)
+        attention_mask = tokenized["attention_mask"].to(self.device)
+        encoder_tokenized = self.tokenizer(proof_states, return_tensors="pt")
+        encoder_ids = encoder_tokenized.input_ids.to(self.device)
+        encoder_mask = encoder_tokenized.attention_mask.to(self.device)
+        logits = self.model(encoder_ids, encoder_mask, decoder_input_ids=input_ids, decoder_attention_mask=attention_mask)
+        # Mask the proof state part
+        max_len = input_ids.shape[1]
+        proof_state_ids_list = self.tokenizer(proof_states, add_special_tokens=False).input_ids
+        tactic_ids_list = self.tokenizer(tactics, add_special_tokens=False).input_ids
+        labels = torch.tensor([[-100] * len(proof_state) + tactic + [-100] * (max_len - len(proof_state) - len(tactic)) for proof_state, tactic in zip(proof_state_ids_list, tactic_ids_list)], device=self.device)
+        ce = torch.nn.functional.cross_entropy(logits.view(labels.shape[0], -1, labels.shape[1]), labels, reduction="sum")
+        return -ce.item()
+
