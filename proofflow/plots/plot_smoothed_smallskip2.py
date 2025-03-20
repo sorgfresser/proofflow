@@ -14,6 +14,8 @@ def plot_mean_reward(csv_file):
     df['mean_reward_rolling'] = df['mean_reward'].rolling(window=10, min_periods=1).mean()
 
     plt.figure(figsize=(8, 4))
+
+    plt.rcParams.update({'font.size': 14})
     plt.plot(df['Step'], df['mean_reward'], label='Raw Mean Reward', alpha=0.5)
     plt.plot(df['Step'], df['mean_reward_rolling'], label='10-round Rolling Average', color='red')
 
@@ -26,9 +28,9 @@ def plot_mean_reward(csv_file):
         plt.annotate(
             "Recovering",
             xy=(recover_step, y_at_recover),
-            xytext=(recover_step - 27 ,y_at_recover + 0.2),  # Shift label left & up
+            xytext=(recover_step - 32 ,y_at_recover + 0.5),  # Shift label left & up
             arrowprops=dict(arrowstyle="->", color='gray', lw=1),
-            fontsize=12,
+            fontsize=13,
             bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.5)
         )
 
