@@ -485,7 +485,7 @@ def sample_mcts_trajectories(
             raise e
 
         # Fill trajectories with the latest move, update rewards
-        prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states) if not node.proven() else [] for node in start_states]
+        prompts = [policy._build_prompt(node.root.proof_state, None, node.root.previous_states, state_skip=state_skip) if not node.proven() else [] for node in start_states]
 
         # Actual MCTS move after trying a few nodes
         for node in start_states:
@@ -537,11 +537,12 @@ def get_similarity(action_trajs: List[List[List[int]]], N: int = 2) -> float:
 
 
 class PrecomputedTrajectoryDataset(TheoremDataset):
-    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy, create_lookup: bool = False, filter_lake: bool = True):
+    def __init__(self, data_path: Path, tokenizer: PreTrainedTokenizer, policy: Policy, create_lookup: bool = False, filter_lake: bool = True, state_skip: int = 1):
         super().__init__(data_path, filter_lake=filter_lake)
         self.tokenizer = tokenizer
         self.policy = policy
         self._lookup = None
+        self.state_skip = state_skip
         if create_lookup:
             self._lookup = {thm.full_name: idx for idx, thm in enumerate(self.thms)}
 
@@ -552,10 +553,10 @@ class PrecomputedTrajectoryDataset(TheoremDataset):
         proof_states: List[str] = []
         for tactic in thm.traced_tactics:
             gfn_actions.append(self.tokenizer.encode(tactic.tactic))
-            gfn_states.append(self.policy._build_prompt(tactic.state_before, None, proof_states))
+            gfn_states.append(self.policy._build_prompt(tactic.state_before, None, proof_states, state_skip=self.state_skip))
             proof_states.append(tactic.state_before)
         gfn_states.append(
-            self.policy._build_prompt(self.tokenizer.decode([self.policy.successful_proof_token]), None, proof_states))
+            self.policy._build_prompt(self.tokenizer.decode([self.policy.successful_proof_token]), None, proof_states, state_skip=self.state_skip))
         complete = thm.traced_tactics[-1].state_after == "no goals"
         log_reward: float = _compute_log_rewards([complete], [not complete], [0], len(gfn_actions))[0]
         return gfn_states, gfn_actions, log_reward
@@ -919,9 +920,9 @@ def main():
 
         print("Initializing precomputed trajectories")
         if args.train_on_eval:
-            precomputed_trajectories = PrecomputedTrajectoryDataset(Path("./proof_flow_theorems.json"), tokenizer, policy, create_lookup=True, filter_lake=False)
+            precomputed_trajectories = PrecomputedTrajectoryDataset(Path("./proof_flow_theorems.json"), tokenizer, policy, create_lookup=True, filter_lake=False, state_skip=args.state_skip)
         else:
-            precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy, create_lookup=True)
+            precomputed_trajectories = PrecomputedTrajectoryDataset(LEAN_DOJO_PATH / "train.json", tokenizer, policy, create_lookup=True, state_skip=args.state_skip)
 
         config = {"n_layers": n_layers, "d_model": d_model, "rounds": rounds, "batch_size": batch_size,
                   "gradient_accumulation_steps": gradient_accumulation_steps, "eval_steps": eval_steps,
