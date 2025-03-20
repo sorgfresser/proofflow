@@ -77,16 +77,37 @@ def evaluate(policy: Policy, data: TrainSampleDataset, eval_batch_size: int = 64
     return metrics
 
 
+class EarlyStopper:
+    def __init__(self, patience: int = 1, min_delta: float=0.0, enabled: bool = False):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_accuracy = 0.0
+        self.enabled = enabled
+
+    def early_stop(self, validation_acc: float) -> bool:
+        if not self.enabled:
+            return False
+        if validation_acc > self.min_accuracy:
+            self.min_accuracy = validation_acc
+            self.counter = 0
+        elif validation_acc < (self.min_accuracy - self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+
 def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimizer, gradient_accumulation_steps: int,
                batch_size: int, eval_steps: int, valid_data: TrainSampleDataset, checkpoint_path: Path,
+                early_stopper: EarlyStopper,
                eval_batch_size: int = 4, epochs: int = 3, loss_on_prompt: bool = False, tactics_so_far: bool = False,
-               states_so_far: bool = False, half_precision: bool = False, early_stopping: bool = False):
+               states_so_far: bool = False, half_precision: bool = False):
     data_loader = DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=collate_train_samples)
     policy.model.train()
     scaler = torch.amp.GradScaler(enabled=half_precision, device=policy.device)
     optimizer.zero_grad()
     current_step = 0
-    current_acc = 0
     stopped = False
     print(f"Saving model to {checkpoint_path}")
     policy.save(checkpoint_path)
@@ -110,11 +131,10 @@ def train_loop(policy: Policy, data: TrainSampleDataset, optimizer: optim.Optimi
                 metrics = {f"validation/{key}": value for key, value in metrics.items()}
                 wandb.log(metrics, step=current_step)
                 print(metrics)
-                if current_acc > metrics["validation/accuracy"] and early_stopping:
-                    print("Old accuracy was larger, early stopping...")
+                if early_stopper.early_stop(metrics["validation/accuracy"]):
+                    print("Early stopping...")
                     stopped = True
                     break
-                current_acc = metrics["validation/accuracy"]
                 print(f"Saving model to {checkpoint_path}")
                 policy.save(checkpoint_path)
             current_step += 1
@@ -189,6 +209,7 @@ def main():
     epochs = args.epochs
     eval_batch_size = args.eval_batch_size
     early_stopping = args.early_stopping
+    early_stopper = EarlyStopper(patience=3, min_delta=0.01, enabled=early_stopping)
     optimizer = optim.AdamW(model.parameters())
     config = {"gradient_accumulation_steps": gradient_accumulation_steps, "batch_size": batch_size, "epochs": epochs,
               "eval_steps": eval_steps, "n_layers": n_layers, "d_model": d_model, "eval_batch_size": eval_batch_size,
@@ -196,9 +217,9 @@ def main():
               "states_so_far": args.states_so_far, "half_precision": args.half_precision, "early_stopping": early_stopping}
     wandb.init(project="proofflow", config=config)
     train_loop(policy, train_data, optimizer, gradient_accumulation_steps, batch_size, eval_steps, valid_data,
-               Path(args.checkpoint_path), eval_batch_size=eval_batch_size, epochs=epochs,
+               Path(args.checkpoint_path), early_stopper, eval_batch_size=eval_batch_size, epochs=epochs,
                loss_on_prompt=args.loss_on_prompt, tactics_so_far=args.tactics_so_far, states_so_far=args.states_so_far,
-               half_precision=args.half_precision, early_stopping=early_stopping)
+               half_precision=args.half_precision)
     wandb.finish(exit_code=0)
 
 
