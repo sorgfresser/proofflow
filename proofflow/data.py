@@ -3,6 +3,7 @@ import json
 from typing import Any, Sequence, Generator, Callable, Tuple, Optional
 from pydantic import BaseModel, model_validator
 from lean_repl_py import LeanREPLProofState, LeanREPLHandler, LeanREPLNextProofState
+from dataclasses import dataclass
 from torch.utils.data import Dataset
 from uuid import uuid4
 import re
@@ -186,14 +187,20 @@ class Theorem(BaseModel):
             tactics_so_far.append(tactic.tactic)
             proof_states_so_far.append(tactic.state_before)
 
-    def to_proof_state(self, handler: LeanREPLHandler, repo_path: Path) -> LeanREPLProofState:
+    def to_proof_state(self, handler: LeanREPLHandler, repo_path: Path, comment_imports: bool = False) -> LeanREPLProofState:
         """Manifest the theorem in the Lean REPL and return the corresponding proof state.
 
         :param handler: The Lean repl handler to manifest the theorem in
         :param repo_path: Repository path to the root folder of the repo of this theorem
+        :param comment_imports: Whether to comment out imports or not
         :return: A proof state
         """
         full_path = repo_path / self.file_path
+        if comment_imports:
+            full_path = full_path.with_name(full_path.stem + "_comment" + full_path.suffix)
+            lines = self.commented_imports(repo_path)
+            with full_path.open("w") as f:
+                f.write("".join(lines))
         handler.send_file(full_path, all_tactics=True)
         response, _ = handler.receive_json()
         # Known bug in Lean REPL
@@ -208,12 +215,6 @@ class Theorem(BaseModel):
             raise RuntimeError("Error in manifesting theorem")
         for tactic in tactics:
             if tactic["pos"]["line"] >= self.start.line:
-                # compare_self = tactic["goals"].strip().replace("\n", " ")
-                # compare_self = re.sub(WS, "", compare_self)
-                # compare_other = self.traced_tactics[0].state_before.strip().replace("\n", " ")
-                # compare_other = re.sub(WS, "", compare_other)
-                # assert compare_self == compare_other, compare_self + " != " + compare_other
-
                 # it says goals, but since this is the start of the proof state, should only be one
                 assert tactic["goals"].count("⊢") == 1
                 tactic["goal"] = tactic["goals"]
@@ -226,6 +227,73 @@ class Theorem(BaseModel):
         assert full_path.exists()
         with full_path.open("r") as file:
             lines = file.readlines()
+        return lines
+
+    def _lines_without_comments(self, repo_path) -> list[str]:
+        @dataclass
+        class Comment:
+            start_line: int
+            start_col: int
+            end_line: int
+            end_col: int
+
+            def is_in(self, line: int, col: int) -> bool:
+                if line < self.start_line:
+                    return False
+                if line > self.end_line:
+                    return False
+                if line == self.start_line:
+                    if line == self.end_line:
+                        return self.start_col <= col <= self.end_col
+                    return col >= self.start_col
+                if line < self.end_line:
+                    return True
+                assert line == self.end_line
+                return col <= self.end_col
+
+        lines = self._lines(repo_path)
+        is_comment = False
+        comments: list[Comment] = []
+        current_line_comment = -1
+        current_col_comment = -1
+        for line_num, line in enumerate(lines):
+            for idx in range(len(line) - 1):
+                if line[idx:idx + 2] == "/-":
+                    current_line_comment = line_num
+                    current_col_comment = idx
+                    is_comment = True
+                if not is_comment and line[idx:idx + 2] == "--":
+                    comments.append(
+                        Comment(start_line=line_num, start_col=idx, end_line=line_num, end_col=len(line) - 1))
+                    break
+                if is_comment and line[idx:idx + 2] == "-/":
+                    comments.append(
+                        Comment(start_line=current_line_comment, start_col=current_col_comment, end_line=line_num,
+                                end_col=idx + 1))
+                    is_comment = False
+
+        comments = list(comments)
+        if comments:
+            was_in = False
+            comment = comments.pop(0)
+            for line_num, line in enumerate(lines):
+                to_delete = []
+                for char_number in range(len(line)):
+                    if comment.is_in(line_num, char_number):
+                        to_delete.append(char_number)
+                        was_in = True
+                    elif was_in:
+                        if comments:
+                            comment = comments.pop(0)
+                            was_in = False
+                            if comment.is_in(line_num, char_number):
+                                to_delete.append(char_number)
+                for idx in reversed(to_delete):
+                    line = line[:idx] + line[idx + 1:]
+                # Keep the \n though, all lines read from a file have it
+                if not line.endswith("\n"):
+                    line = line + "\n"
+                lines[line_num] = line
         return lines
 
     def theorem_statement(self, repo_path: Path) -> str:
@@ -292,6 +360,28 @@ class Theorem(BaseModel):
         return imports
 
 
+    def commented_imports(self, repo_path: Path) -> list[str]:
+        """Returns the lines of the underlying file, with the imports commented out.
+
+        Args:
+            repo_path:
+
+        Returns:
+        """
+        lines = self._lines_without_comments(repo_path)
+        is_import_section = True
+        for idx, line in enumerate(lines):
+            if not is_import_section:
+                break
+            if not line.strip():
+                continue
+            if line.strip().startswith("import"):
+                lines[idx] = "--" + line
+                continue
+            is_import_section = False
+        return lines
+
+
 def parse_json(json_path: Path) -> Generator[Theorem, None, None]:
     with json_path.open("r") as f:
         data = json.load(f)
@@ -345,12 +435,14 @@ class TrainSampleDataset(TheoremDataset):
 
 
 class ProofStateDataset(TheoremDataset):
-    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path, repeats: int = 1, sample_count: int = -1, filter_lake: bool = True):
+    def __init__(self, json_path: Path, handler_factory: Callable[[], LeanREPLHandler], repo_path: Path, tmp_dir: Path, repeats: int = 1, sample_count: int = -1, filter_lake: bool = True,
+                 commented_imports: bool = False):
         super().__init__(json_path, sample_count, filter_lake)
         self.handler_factory = handler_factory
         self.repo_path = repo_path
         self.tmp_dir = tmp_dir
         self.repeats = repeats
+        self.commented_imports = commented_imports
 
     def __len__(self):
         return len(self.thms) * self.repeats
@@ -359,8 +451,13 @@ class ProofStateDataset(TheoremDataset):
         item = item // self.repeats
         thm = super().__getitem__(item)
         handler = self.handler_factory()
+        if self.commented_imports:
+            handler.send_command("import Mathlib")
+            response, env = handler.receive_json()
+            assert not response
+            handler.env = env
         try:
-            proof_state = thm.to_proof_state(handler, repo_path=self.repo_path)
+            proof_state = thm.to_proof_state(handler, repo_path=self.repo_path, comment_imports=self.commented_imports)
             pickle_path = self.tmp_dir / f"{uuid4()}.pickle"
             pickled, env = handler.pickle_proof_state(pickle_path, proof_state.proof_state)
             assert isinstance(pickled, LeanREPLNextProofState)
