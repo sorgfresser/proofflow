@@ -270,7 +270,13 @@ def _get_start_states(start_loader: Iterator, handlers: list[LeanREPLHandler], n
     thms = [thm for thm in thms for _ in range(num_repeats)]
     paths = [path for path in paths for _ in range(num_repeats)]
     # Start all REPLs
-    proof_states= [handler.unpickle_proof_state(path) for handler, path in zip(handlers, paths)]
+    proof_states = []
+    for handler, path in zip(handlers, paths):
+        try:
+            proof_states.append(handler.unpickle_proof_state(path))
+        except RuntimeError as e:
+            print(e)
+            return None
     # Gather
     proof_states = [proof_state for proof_state, env in proof_states]
     # Unlink them all, not needed anymore
@@ -609,11 +615,11 @@ def evaluate(policy: Policy, eval_loader: DataLoader, handler_factory: Callable[
         batch = _get_start_states(eval_iter, handlers)
         with tqdm(total=len(eval_loader)) as pbar:
             while batch is not None:
+                _, start_states = batch
                 # If the whole batch was invalid, quite unlikely, but possible
-                if not batch:
+                if not start_states:
                     batch = _get_start_states(eval_iter, handlers)
                     continue
-                _, start_states = batch
                 try:
                     _state_trajectories, action_trajectories, gen_log_rewards, nodes_proven, proof_state_ratio = sample_mcts_trajectories(
                         policy, start_states, handlers, search_time, device, max_retries=max_retries, state_skip=state_skip, reprover_policy=reprover_policy, special_reward_for_mcts=special_reward
