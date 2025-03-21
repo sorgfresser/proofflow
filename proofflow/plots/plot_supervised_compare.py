@@ -82,7 +82,8 @@ def plot_accuracy_vs_epoch(
     plt.title('Validation Accuracy per Epoch')
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    #plt.show()
+    plt.savefig("supervisedcompareacc.png")
 
 
 if __name__ == "__main__":
