@@ -1,0 +1,20 @@
+program: proofflow/evaluate.py
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - bigmodelnew.pt
+  - leandojo_benchmark_4/random/test.json
+  - ${args_no_boolean_flags}
+name: sweepevaluatemctsmedium
+method: grid
+metric:
+  goal: maximize
+  name: validation/mean_reward_
+parameters:
+  search-time:
+    values: [1, 3, 10]
+  best-first:
+    values: [true, false]
+  special-reward:
+    values: [true, false]
