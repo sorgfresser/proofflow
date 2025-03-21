@@ -436,8 +436,11 @@ class ReProverPolicy(Policy):
 
     def _build_prompt(self, proof_state: str, tactics_so_far: Optional[List[str]] = None,
                       proof_states_so_far: Optional[List[str]] = None, state_skip: int = 10) -> List[int]:
-        proof_states_so_far = proof_states_so_far[len(proof_states_so_far) % state_skip:: state_skip]
-        full = proof_states_so_far + [proof_state]
+        if proof_states_so_far is not None:
+            proof_states_so_far = proof_states_so_far[len(proof_states_so_far) % state_skip:: state_skip]
+            full = proof_states_so_far + [proof_state]
+        else:
+            full = [proof_state]
         return self.tokenizer.encode("\n".join(full))
 
     @classmethod
@@ -505,10 +508,10 @@ class ReProverPolicy(Policy):
             tactics = [tactics]
         assert len(proof_states) == len(tactics)
         full = [proof_state + "\n" + tactic for proof_state, tactic in zip(proof_states, tactics)]
-        tokenized = self.tokenizer(full, return_tensors="pt")
+        tokenized = self.tokenizer(full, return_tensors="pt", padding=True)
         input_ids = tokenized["input_ids"].to(self.device)
         attention_mask = tokenized["attention_mask"].to(self.device)
-        encoder_tokenized = self.tokenizer(proof_states, return_tensors="pt")
+        encoder_tokenized = self.tokenizer(proof_states, return_tensors="pt", padding=True)
         encoder_ids = encoder_tokenized.input_ids.to(self.device)
         encoder_mask = encoder_tokenized.attention_mask.to(self.device)
         logits = self.model(encoder_ids, encoder_mask, decoder_input_ids=input_ids, decoder_attention_mask=attention_mask)
@@ -519,4 +522,39 @@ class ReProverPolicy(Policy):
         labels = torch.tensor([[-100] * len(proof_state) + tactic + [-100] * (max_len - len(proof_state) - len(tactic)) for proof_state, tactic in zip(proof_state_ids_list, tactic_ids_list)], device=self.device)
         ce = torch.nn.functional.cross_entropy(logits.view(labels.shape[0], -1, labels.shape[1]), labels, reduction="sum")
         return -ce.item()
+
+    def evaluate_batch(self, batch: list[TrainingSample], state_skip : int = 1) -> dict[str, float]:
+        """Evaluate on one single batch of training samples.
+
+        :param batch: The batch to evaluate on
+        :return: The metrics
+        """
+        prompts = [self._build_prompt(sample.proof_state + "\n", sample.tactics_so_far, state_skip=state_skip)[:-1] for sample in batch]
+        tactics = [self.tokenizer.encode(sample.tactic, add_special_tokens=False) for sample in batch]
+
+        full = {
+            "input_ids": [prompt + tactic + [self.eos_token] for prompt, tactic in zip(prompts, tactics, strict=True)]}
+
+        padded = self.tokenizer.pad(full, padding_side="right", return_attention_mask=True, return_tensors="pt")
+        encoder_ids = self.tokenizer.pad({"input_ids": [prompt + [self.eos_token] for prompt in prompts]}, padding_side="right", return_attention_mask=True, return_tensors="pt")
+
+        encoder_input_ids = encoder_ids["input_ids"].to(self.device)
+        encoder_attention_mask = encoder_ids["attention_mask"].to(self.device)
+        decoder_input_ids = padded["input_ids"].to(self.device)
+        decoder_attention_mask = padded["attention_mask"].to(self.device)
+
+        logits = self.model(encoder_input_ids, encoder_attention_mask, decoder_input_ids, decoder_attention_mask)
+        # Only compute loss for the part after the prompt
+        labels = decoder_input_ids[:, 1:]
+        attention_mask = decoder_attention_mask[:, 1:]
+        labels = labels.masked_fill(~attention_mask.bool(), -100)
+        for i in range(len(prompts)):
+            labels[i, :len(prompts[i]) - 1] = -100
+        logits = logits[:, :-1, :]
+        loss = self.loss_fn(logits.transpose(2, 1), labels)
+        # Exact match
+        is_correct: torch.Tensor = logits.argmax(dim=-1) == labels
+        # Ignore padding
+        accuracy = (is_correct.sum().item() / (is_correct.numel() - (labels == -100).sum())).item()
+        return {"loss": loss.item(), "perplexity": loss.exp().item(), "accuracy": accuracy}
 
